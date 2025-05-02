@@ -95,6 +95,8 @@ mamba install bioconda::bowtie2
 mamba install bioconda::samtools
 mamba install bioconda::bedtools
 mamba install bioconda::ucsc-bedgraphtobigwig
+mamba install bioconda::cooler
+mamba install bioconda::pysam
 ```
 
 TO BE COMPLETED
