@@ -1,5 +1,5 @@
 
-# HiC-BERG
+# Hicberg
 
 ## Badges
 
