@@ -255,8 +255,6 @@ def get_local_density(cooler_file : str = None, chrom_name : tuple = (None, None
 
     if size % 2 == 0:
         raise ValueError("Kernel size must be odd")
-    
-    print(f"Cooler file : {cooler_file}")
 
     #Load cooler file
     matrix = cooler.Cooler(cooler_file).matrix(balance = True).fetch(chrom_name[0], chrom_name[1])
@@ -675,8 +673,8 @@ def classify_reads(bam_couple : tuple[str, str] = ("1.sorted.bam", "2.sorted.bam
 
 
     # Cleaning files after classification
-    # forward_bam_file_path.unlink()
-    # reverse_bam_file_path.unlink()
+    forward_bam_file_path.unlink()
+    reverse_bam_file_path.unlink()
 
 def is_intra_chromosome(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSegment) -> bool:
     """

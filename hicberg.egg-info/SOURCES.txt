@@ -168,6 +168,7 @@ hicberg/__main__.py
 hicberg/align.py
 hicberg/benchmark.py
 hicberg/eval.py
+hicberg/filter.py
 hicberg/io.py
 hicberg/omics.py
 hicberg/pipeline.py

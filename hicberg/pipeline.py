@@ -20,27 +20,13 @@ import hicberg.plot as hpl
 import hicberg.statistics as hst
 import hicberg.omics as hom
 
-
 from hicberg import logger
 
 UNRESCUED_MATRIX = "unrescued_map.cool"
 RESTRICTION_MAP = "restriction_map.npy"
 
-
-def check_tool(name: str) -> bool:
-    """
-    Check whether `name` is on PATH and marked as executable.
-
-    Parameters
-    ----------
-    name : [str]
-        Depenedency to check.
-
-    Returns
-    -------
-    [bool]
-        True if the tool is available, False otherwise.
-    """    
+def check_tool(name):
+    """Check whether `name` is on PATH and marked as executable."""
 
     return which(name) is not None
 
@@ -87,7 +73,7 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         logger.error(f"The two provided inputs {fq_for} and {fq_rev} files must be different.")
         raise IOError(f"The two provided inputs {fq_for} and {fq_rev} files must be different.")
         
-    logger.info("Start HiCBERG pipeline")
+    logger.info("Start HiCBERG pipeline, welcome2")
 
     # Keep track of the arguments used
     for arg in args:
@@ -125,36 +111,26 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         hal.hic_sort(cpus = cpus, output_dir = output_folder, verbose = True)
 
     if exit_stage == 2:
-
         logger.info(f"Ending HiCBERG pipeline at {exit_stage}")
         return
     
     if start_stage < 3:
-
         logger.info(f"Starting reads classification")
         hut.classify_reads(mapq = mapq, output_dir = output_folder)
 
     if exit_stage == 3:
-
         logger.info(f"Ending HiCBERG pipeline at {exit_stage}")
         return
     
     if start_stage < 4:
-
         hio.build_pairs(output_dir = output_folder)
-
-        if mode != "omics":
-
-            hio.build_matrix(cpus = cpus, balance = True, output_dir = output_folder)
-        else:
-            hio.build_matrix(cpus = cpus, balance = False, output_dir = output_folder)
+        hio.build_matrix(cpus = cpus, balance = True, output_dir = output_folder)
 
     if exit_stage == 4:
         logger.info(f"Ending HiCBERG pipeline at {exit_stage}")
         return
     
     if start_stage < 5:
-
 
         restriction_map = hst.get_restriction_map(genome = genome, enzyme = enzyme, output_dir = output_folder)
         hst.get_dist_frags(genome = genome, restriction_map = restriction_map, circular = circular, rate = rate, output_dir = output_folder)
@@ -165,33 +141,20 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         p3 = Process(target = hst.generate_coverages, kwargs = dict(genome = genome, bins = bins, output_dir = output_folder))
         p4 = Process(target = hst.generate_d1d2, kwargs = dict(output_dir = output_folder))
 
-        if mode != "omics":
+        for process in [p1, p2, p3, p4]:
+            process.start()
 
-            for process in [p1, p2, p3, p4]:
-                process.start()
-
-            for process in [p1, p2, p3, p4]:
-                process.join()
-
-        elif mode == "omics":
-
-            for process in [p1, p2, p3]:
-                process.start()
-
-            for process in [p1, p2, p3]:
-                process.join()
+        for process in [p1, p2, p3, p4]:
+            process.join()
 
         if mode in ["full", "density"]:
-
             hst.compute_density(cooler_file = UNRESCUED_MATRIX, kernel_size = kernel_size, deviation = deviation, threads  = cpus, output_dir  = output_folder)
         
     if exit_stage == 5:
-
         logger.info(f"Ending HiCBERG pipeline at {exit_stage}")
         return
 
     if start_stage < 6:
-
         restriction_map = hio.load_dictionary(Path(output_folder) / RESTRICTION_MAP)
 
         hut.chunk_bam(nb_chunks = nb_chunks, output_dir = output_folder)
@@ -214,18 +177,15 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         rmtree(folder_to_delete)
 
     if exit_stage == 5:
-
         logger.info(f"Ending HiCBERG pipeline at {exit_stage}")
         return
 
     if start_stage < 6:
-
         hio.build_pairs(mode = True, output_dir = output_folder)
 
         hio.build_matrix(cpus = cpus, balance = True, mode = True, output_dir = output_folder)
         
         if mode == "omics":
-
             hom.preprocess_pairs(pairs_file = "all_group.pairs", threshold  = distance, output_dir = output_folder)
             hom.format_chrom_sizes(chromosome_sizes = "chromosome_sizes.npy", output_dir = output_folder)
             hom.get_bed_coverage(chromosome_sizes = "chromosome_sizes.bed", pairs_file = "preprocessed_pairs.pairs", output_dir = output_folder)
@@ -233,7 +193,6 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
             hom.bedgraph_to_bigwig(bedgraph_file = "coverage.bedgraph", chromosome_sizes = "chromosome_sizes.txt", output_dir = output_folder)
 
     if start_stage <= 6:
-
         logger.info(f"Start plotting results")
         p1 = Process(target = hpl.plot_laws, kwargs = dict(output_dir = output_folder))
         p2 = Process(target = hpl.plot_trans_ps, kwargs = dict(output_dir = output_folder))

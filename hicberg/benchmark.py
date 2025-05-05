@@ -51,64 +51,61 @@ REVERSE_OUT_FILE = "group1.2.out.bam"
 
 # TODO : Complete docstring
 def benchmark(output_dir : str = None, chromosome : str = "", position : int = 0, trans_chromosome : str = None, trans_position : int = None, strides : list[int] = [], mode : str = "full", auto : int = None, kernel_size : int = 11, deviation : float = 0.5, bins : int = None, circular :str = "", genome : str = None, pattern : str = None, threshold : float = 0.0, jitter : int = 0, trend : bool = True, top : int = 100,  force : bool = False, iterations : int = 3, cpus : int = 8):
-    """
-    Performs a benchmark of the HiC-Berg method by simulating the deletion of a genomic region and evaluating the method's ability to recover the original signal.
-
-    The benchmark simulates the deletion of a genomic region by removing reads that map to that region from a Hi-C dataset. 
-    It then applies the HiC-Berg method to the depleted dataset to try to recover the original signal. 
-    The benchmark evaluates the method's performance by comparing the rescued contact map to the original contact map.
+    """AI is creating summary for benchmark
 
     Parameters
     ----------
     output_dir : str, optional
-        Path to the output directory.
+        [description], by default None
     chromosome : str, optional
-        Chromosome to perform the benchmark on.
+        [description], by default ""
     position : int, optional
-        Position of the deletion on the chromosome.
+        [description], by default 0
     trans_chromosome : str, optional
-        Chromosome to consider for trans interactions.
+        [description], by default None
     trans_position : int, optional
-        Position of the deletion on the trans chromosome.
+        [description], by default None
     strides : list[int], optional
-        List of strides to use for the deletion.
+        [description], by default []
     mode : str, optional
-        Mode of the HiC-Berg method to use. Can be "full" or "density".
+        [description], by default "full"
     auto : int, optional
-        Automatically determine the size of the deletion based on the given number of bins.
+        [description], by default None
     kernel_size : int, optional
-        Size of the kernel to use for the density estimation.
+        [description], by default 11
     deviation : float, optional
-        Standard deviation of the kernel to use for the density estimation.
+        [description], by default 0.5
     bins : int, optional
-        Number of bins to use for the deletion.
+        [description], by default None
     circular : str, optional
-        Whether the chromosome is circular.
+        [description], by default ""
     genome : str, optional
-        Genome assembly to use.
+        [description], by default None
     pattern : str, optional
-        Pattern to use for Chromosight pre-call.
+        [description], by default None
     threshold : float, optional
-        Threshold to use for Chromosight pre-call.
+        [description], by default 0.0
     jitter : int, optional
-        Jitter to use for Chromosight pre-call.
+        [description], by default 0
     trend : bool, optional
-        Whether to use trend for Chromosight pre-call.
+        [description], by default True
     top : int, optional
-        Top patterns to use for Chromosight pre-call.
+        [description], by default 100
     force : bool, optional
-        Whether to force the benchmark to run even if the output directory already exists.
+        [description], by default False
     iterations : int, optional
-        Number of iterations to run the HiC-Berg method.
+        [description], by default 3
     cpus : int, optional
-        Number of CPUs to use for parallel processing.
+        [description], by default 8
 
     Raises
     ------
     ValueError
-        If the output directory does not exist.
+        [description]
     ValueError
-        If the restriction map file does not exist.
+        [description]
+    ValueError
+        [description]
     """    
     # logger.addHandler('hicberg_benchmark.log')
 
