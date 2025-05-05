@@ -42,7 +42,7 @@ mamba env create -n [ENV_NAME] -f hicberg.yaml;
 
 ### Dependencies
 
-To ensure that HiC-BERG is correctly working, Bowtie2, Samtools, bedGraphToBigWig and BedTools have to be installed. These can be install through : 
+To ensure that Hicberg is correctly working, Bowtie2, Samtools, bedGraphToBigWig and BedTools have to be installed. These can be install through : 
 
 ```bash
 
@@ -69,7 +69,7 @@ or in developper mode:
 
 ### pip
 
-Install HiC-BERG locally by using
+Install Hicberg locally by using
 
 ```bash
 
@@ -79,7 +79,7 @@ Install HiC-BERG locally by using
 
 ### Conda / Mamba
 
-We highly recommend installing HiC-BERG through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
+We highly recommend installing Hicbergthrough [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
 
 ```bash
 conda install -c bioconda hicberg
@@ -103,9 +103,9 @@ TO BE COMPLETED
 
 ### <a id="Docker"></a> Docker
 
-HiC-BERG can be used via Docker to limit dependency compatibility problems. More information about container such as Docker can be found [there](https://www.docker.com/get-started/).
+Hicberg can be used via Docker to limit dependency compatibility problems. More information about container such as Docker can be found [there](https://www.docker.com/get-started/).
 
-To be used through Docker, the HiC-BERG container as to be build using :
+To be used through Docker, the Hicbergcontainer as to be build using :
 
 ```bash
 # Pick user and group variables
@@ -122,28 +122,28 @@ Hicberg can therefore be used with usual command detailed further using :
 sudo docker run   -v $PWD:$PWD  -w <working directory> -u $(id -u):$(id -g)  hicberg:0.0.1 <hicberg_command>
 ```
 
-N.B : _working_directory_ and _output (-o argument)_ of HiC-BERG command have to be the same.
+N.B : _working_directory_ and _output (-o argument)_ of Hicberg command have to be the same.
 
-For instance if you need to access the help of HiC-BERG through Docker :
+For instance if you need to access the help of Hicberg through Docker :
 
 ```bash
 sudo docker run -v $PWD:$PWD  -w <working directory> -u $(id -u):$(id -g)  hicberg:0.0.1 hicberg --help
 ```
 
-HiC-BERG can also be used through Docker in interactive mode using :
+Hicberg can also be used through Docker in interactive mode using :
 
 ```bash
 sudo docker run -v $PWD:$PWD  -w <working directory> -u $(id -u):$(id -g) -it  hicberg:0.0.1
 ```
 
-Then, the user will be directly placed in an interactive shell where HiC-BERG can be use directly, by typing any of HiC-BERG command such as further examples.
+Then, the user will be directly placed in an interactive shell where Hicberg can be use directly, by typing any of Hicberg command such as further examples.
 
 ## <a id="usage"></a> Usage/Examples
 
 
 ## Full pipeline
 
-<img src="/docs/images/Hicberg_pipeline.png" alt="HiC-BERG"/>
+<img src="/docs/images/Hicberg_pipeline.png" alt="Hicberg"/>
 
 All components of the pipeline can be run at once using the hicberg pipeline command. This allows to generate a contact matrix and its reconstruction from reads in a single command.\
 By default, the output is in COOL format. More detailed documentation can be found on the readthedocs website:
