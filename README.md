@@ -116,7 +116,7 @@ export HOST_GID=$(id -g);
 sudo docker build --build-arg UID=$HOST_UID --build-arg GID=$HOST_GID -t hicberg:0.0.1 .
 ```
 
-HiC-BERG can therefore be used with usual command detailed further using : 
+Hicberg can therefore be used with usual command detailed further using : 
 
 ```bash
 sudo docker run   -v $PWD:$PWD  -w <working directory> -u $(id -u):$(id -g)  hicberg:0.0.1 <hicberg_command>
@@ -205,7 +205,7 @@ library_name_2;species_2;sampling_rate_2;enzymes_2;kernel_sizes_2;deviations_2;m
 
 #### Locally
 
-The HiC-BERG pipeline can be run using Snakemake. The pipeline is defined in the file Snakefile. The pipeline can be run using the following command:
+The Hicberg pipeline can be run using Snakemake. The pipeline is defined in the file Snakefile. The pipeline can be run using the following command:
 
 ```bash
 snakemake --cores [cpus]
@@ -213,7 +213,7 @@ snakemake --cores [cpus]
 
 #### Cluster
 
-HiC-BERG can also be run on a cluster using Snakemake. The cluster configuration is defined in the file cluster_slurm.yaml. The pipeline can be run using the following command:
+Hicberg can also be run on a cluster using Snakemake. The cluster configuration is defined in the file cluster_slurm.yaml. The pipeline can be run using the following command:
 
 ```bash
 snakemake --cluster "sbatch --mem {cluster.mem} -p {cluster.partition} --qos {cluster.queue} -c {cluster.ncpus} 
