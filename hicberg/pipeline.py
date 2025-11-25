@@ -73,7 +73,7 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         logger.error(f"The two provided inputs {fq_for} and {fq_rev} files must be different.")
         raise IOError(f"The two provided inputs {fq_for} and {fq_rev} files must be different.")
         
-    logger.info("Start HiCBERG pipeline, welcome2")
+    logger.info("Start HiCBERG pipeline, welcome3")
 
     # Keep track of the arguments used
     for arg in args:
@@ -133,10 +133,11 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
     if start_stage < 5:
 
         restriction_map = hst.get_restriction_map(genome = genome, enzyme = enzyme, output_dir = output_folder)
-        hst.get_dist_frags(genome = genome, restriction_map = restriction_map, circular = circular, rate = rate, output_dir = output_folder)
+        # hst.get_dist_frags(genome = genome, restriction_map = restriction_map, circular = circular, rate = rate, output_dir = output_folder)
+        
         hst.log_bin_genome(genome = genome, output_dir = output_folder)
-
         p1 = Process(target = hst.get_patterns, kwargs = dict(circular = circular, blacklist = blacklist, output_dir = output_folder))
+        
         p2 = Process(target = hst.generate_trans_ps, kwargs = dict(output_dir = output_folder))
         p3 = Process(target = hst.generate_coverages, kwargs = dict(genome = genome, bins = bins, output_dir = output_folder))
         p4 = Process(target = hst.generate_d1d2, kwargs = dict(output_dir = output_folder))
@@ -147,7 +148,7 @@ def pipeline(name : str = "sample",start_stage : str = "fastq", exit_stage : str
         for process in [p1, p2, p3, p4]:
             process.join()
 
-        if mode in ["full", "density"]:
+        if mode in ["density"]:   # axel, june 2025 I remove the full mode here since it is the default one 
             hst.compute_density(cooler_file = UNRESCUED_MATRIX, kernel_size = kernel_size, deviation = deviation, threads  = cpus, output_dir  = output_folder)
         
     if exit_stage == 5:

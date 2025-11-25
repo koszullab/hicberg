@@ -1208,9 +1208,9 @@ def compute_propensity(read_forward : pysam.AlignedSegment, read_reverse : pysam
         else:     
             ps = get_trans_ps(read_forward, read_reverse, trans_ps)
 
-            # Avoid ps = 0 making the read unselectable. Value of 1 make the propensity unsensitive to P(s).
-            if ps == 0:
-                ps = 1
+            # # Avoid ps = 0 making the read unselectable. Value of 1 make the propensity unsensitive to P(s).
+            # if ps == 0:
+            #     ps = 1
 
         cover = get_pair_cover(read_forward, read_reverse, coverage, bins=bins)
 
@@ -1261,7 +1261,7 @@ def compute_propensity(read_forward : pysam.AlignedSegment, read_reverse : pysam
         if cover <= 0:
             cover = 1
 
-        return ps
+        return ps *  cover
 
 
 
@@ -1402,8 +1402,11 @@ def draw_read_couple(propensities : np.array) -> int:
     
     # print(f"propensities : {propensities}")
 
-    # propensities = [0 if x is None else x for x in propensities]   # to replace None by 0   axel
-
+    propensities = [0 if x is None else x for x in propensities]   # to replace None by 0   Axel
+    propensities = [0 if str(x) == 'Nan' else x for x in propensities]   # to replace None by 0   Axel
+    propensities = [0 if str(x) == 'nan' else x for x in propensities]   # to replace None by 0   Axel
+    # propensities[np.isnan(propensities)] = 0
+    
     xk = np.arange(len(propensities))
 
     if  np.sum(propensities) > 0: 
