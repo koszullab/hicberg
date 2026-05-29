@@ -6,14 +6,11 @@ from functools import partial
 
 from multiprocessing import Process, Pool
 
-
 from glob import glob
 # import tempfile as tmpf
 # import multiprocessing as mp
 import subprocess as sp
 from datetime import datetime
-
-
 from itertools import product
 
 from shutil import rmtree
@@ -41,8 +38,8 @@ FRAGMENTS = "fragments_fixed_sizes.txt"
 DIST_FRAGS = "dist.frag.npy"
 CHROMOSOME_SIZES = "chromosome_sizes.npy"
 XS = "xs.npy"
-UNRESCUED_MATRIX = "unrescued_map.cool"
-RESCUED_MATRIX = "rescued_map.cool"
+UNRESCUED_MATRIX = "unrescued.pairs.cool"
+RESCUED_MATRIX = "rescued.pairs.cool"
 RESTRICTION_MAP = "restriction_map.npy"
 FORWARD_IN_FILE = "group1.1.in.bam"
 REVERSE_IN_FILE = "group1.2.in.bam"
@@ -281,7 +278,7 @@ def benchmark(output_dir : str = None, chromosome : str = "", position : int = 0
         # Reattribute reads from inner group
         if not learning_status : 
             ## Compute statistics
-            p1 = Process(target = hst.get_patterns, kwargs = dict(forward_bam_file  = forward_out_path, reverse_bam_file = reverse_out_path, circular = circular, output_dir = output_data_path))
+            p1 = Process(target = hst.generate_intra_ps, kwargs = dict(forward_bam_file  = forward_out_path, reverse_bam_file = reverse_out_path, circular = circular, output_dir = output_data_path))
             p2 = Process(target = hst.generate_trans_ps, kwargs = dict(output_dir = output_data_path))
             p3 = Process(target = hst.generate_coverages, kwargs = dict(forward_bam_file = forward_out_path, reverse_bam_file  = reverse_out_path, genome = genome, bins = bin_size, output_dir = output_data_path))
             p4 = Process(target = hst.generate_d1d2, kwargs = dict(forward_bam_file = forward_out_path, reverse_bam_file  = reverse_out_path, output_dir = output_data_path))
@@ -299,7 +296,7 @@ def benchmark(output_dir : str = None, chromosome : str = "", position : int = 0
             logger.info("Learning step completed")
 
             if "density" in mode.split(","):
-                hst.compute_density(cooler_file = UNRESCUED_MATRIX, kernel_size = kernel_size, deviation = deviation, threads = cpus, output_dir  = output_data_path)
+                hst.generate_density_map2(cooler_file = UNRESCUED_MATRIX, kernel_size = kernel_size, deviation = deviation, threads = cpus, output_dir  = output_data_path)
 
         learning_status = True
 
@@ -340,7 +337,7 @@ def benchmark(output_dir : str = None, chromosome : str = "", position : int = 0
 
             rescued_matrix_path = output_data_path / RESCUED_MATRIX
 
-            pearson = hst.pearson_score(original_matrix = base_matrix, rescued_matrix = rescued_matrix , markers = indexes)
+            pearson = hut.pearson_score(original_matrix = base_matrix, rescued_matrix = rescued_matrix , markers = indexes)
 
             if pattern is None or pattern == "-1":
                 chromosome_set = [*chromosome, *trans_chromosome] if trans_chromosome is not None else chromosome

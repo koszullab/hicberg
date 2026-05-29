@@ -7,7 +7,7 @@ import hicberg.io as hio
 from hicberg import logger
 
 
-def preprocess_pairs(pairs_file : str = "all_group.pairs", threshold : int = 1000, output_dir : str = None) -> None:
+def preprocess_pairs(pairs_file : str = "rescued.pairs", threshold : int = 1000, output_dir : str = None) -> None:
     """
     Preprocess pairs file to remove pairs that are not in the same chromosome or are greater than a threshold.
     Retain columns are : chromosome, start, end, count.
@@ -15,7 +15,7 @@ def preprocess_pairs(pairs_file : str = "all_group.pairs", threshold : int = 100
     Parameters
     ----------
     pairs_file : str, optional
-        Path to the pairs file, by default "all_group.pairs"
+        Path to the pairs file, by default "rescued.pairs"
     threshold : int, optional
         Threshold distance beyond which pairs will not be kept, by default 1000
     output_dir : str, optional

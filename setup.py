@@ -11,7 +11,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Standalone command line tool to visualize coverage from a BAM file
+"""Command line tool to infer contact data from repeated elements in Hi-C
 """
 
 from setuptools import setup, find_packages
@@ -39,11 +39,11 @@ name = "hicberg"
 
 MAJOR = 1
 MINOR = 0
-MAINTENANCE = 0
+MAINTENANCE = 2
 VERSION = "{}.{}.{}".format(MAJOR, MINOR, MAINTENANCE)
 
 LICENSE = "MIT"
-URL = "https://github.com/sebgra/hicberg"
+URL = "https://github.com/koszullab/hicberg"
 
 DESCRIPTION = __doc__.strip("\n")
 

@@ -76,7 +76,7 @@ def get_interval_index(chromosome : str = "", value : int = None, intervals_dict
     return out_dict
 
 
-def select_reads(bam_for : str = "group1.1.bam", bam_rev : str = "group1.2.bam", matrix_file: str = "unrescued_map.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
+def select_reads(bam_for : str = "group1.1.bam", bam_rev : str = "group1.2.bam", matrix_file: str = "unrescued.pairs.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
 trans_chromosome :  str = None, output_dir : str = None, trans_position : list[int] = None, nb_bins : int = 1, random : bool = False, auto : int = None) -> dict[str, list[(int, int)]]:
     """
     Select reads from a given matrix and alignment files. Two groups of alignment files are produced (.bam):
@@ -90,7 +90,7 @@ trans_chromosome :  str = None, output_dir : str = None, trans_position : list[i
     bam_rev : str, optional
         Reverse alignment file to select reads from, by default "group1.2.bam"
     matrix_file : str, optional
-        Name of the matrix from which the selection will be based (.cool format), by default "unrescued_map.cool"
+        Name of the matrix from which the selection will be based (.cool format), by default "unrescued.pairs.cool"
     position : int, optional
         Genomic coordinates (0-based) used to defined the source genomic interval, by default 0
     chromosome : str or list[str], optional
@@ -482,7 +482,7 @@ trans_chromosome :  str = None, output_dir : str = None, trans_position : list[i
     return dictionary_of_intervals
 
 
-def select_reads_multithreads_bckp(bam_couple : tuple[str, str], matrix_file: str = "unrescued_map.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
+def select_reads_multithreads_bckp(bam_couple : tuple[str, str], matrix_file: str = "unrescued.pairs.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
 trans_chromosome :  str = None, output_dir : str = None, trans_position : list[int] = None, nb_bins : int = 1, random : bool = False, auto : int = None) -> dict[str, list[(int, int)]]:
     """
     Select reads from a given matrix and alignment files. Two groups of alignment files are produced (.bam):
@@ -496,7 +496,7 @@ trans_chromosome :  str = None, output_dir : str = None, trans_position : list[i
     bam_rev : str, optional
         Reverse alignment file to select reads from, by default "group1.2.bam"
     matrix_file : str, optional
-        Name of the matrix from which the selection will be based (.cool format), by default "unrescued_map.cool"
+        Name of the matrix from which the selection will be based (.cool format), by default "unrescued.pairs.cool"
     position : int, optional
         Genomic coordinates (0-based) used to defined the source genomic interval, by default 0
     chromosome : str or list[str], optional
@@ -903,7 +903,7 @@ def select_reads_multithreads(bam_couple : tuple[str, str], interval_dictionary 
     bam_rev : str, optional
         Reverse alignment file to select reads from, by default "group1.2.bam"
     matrix_file : str, optional
-        Name of the matrix from which the selection will be based (.cool format), by default "unrescued_map.cool"
+        Name of the matrix from which the selection will be based (.cool format), by default "unrescued.pairs.cool"
     position : int, optional
         Genomic coordinates (0-based) used to defined the source genomic interval, by default 0
     chromosome : str or list[str], optional
@@ -1179,7 +1179,7 @@ def select_reads_multithreads(bam_couple : tuple[str, str], interval_dictionary 
     return None
 
 
-def generate_dict_coordinates(matrix_file: str = "unrescued_map.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
+def generate_dict_coordinates(matrix_file: str = "unrescued.pairs.cool", position : int = 0, chromosome : str | list[str] = "", bin_size : int  = 2000, chrom_sizes_dict : str =  "chromosome_sizes.npy", strides : list[int] = [0],
 trans_chromosome :  str = None, output_dir : str = None, trans_position : list[int] = None, nb_bins : int = 1, random : bool = False, auto : int = None) -> dict[str, list[(int, int)]]:
 
     output_path = Path(output_dir)
@@ -2119,7 +2119,7 @@ def hicberg_benchmark_cmd_generator(file : str = None, top : int = 10, threshold
     Returns
     -------
     str
-        HiC-BERG command line to run to evaluate reconstruction after pattern discarding
+        Hicberg command line to run to evaluate reconstruction after pattern discarding
     """
     
 
@@ -2132,7 +2132,7 @@ def hicberg_benchmark_cmd_generator(file : str = None, top : int = 10, threshold
     return cmd
 
 
-def chromosight_cmd_generator(file : str = None, pattern : str = "loops", untrend : bool = True, mode : bool = False,  output_dir : str = None) -> str:
+def chromosight_cmd_generator(file : str = None, pattern : str = "circles", untrend : bool = True, mode : bool = False,  output_dir : str = None) -> str:
     """
     Generate chromosight command line to run pattern detection.
 
@@ -2141,7 +2141,7 @@ def chromosight_cmd_generator(file : str = None, pattern : str = "loops", untren
     file : str, optional
         Path to Hi-C balanced contact matrix in .cool format , by default None
     pattern : str, optional
-        Pattern to detect, by default "loops"
+        Pattern to detect, by default "circles"
     untrend : bool, optional
         Set if map has to be detrended, by default True
     mode : bool, optional

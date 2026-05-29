@@ -6,6 +6,8 @@ import uuid
 import click
 from hicberg import logger
 
+
+
 def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , verbose : bool = False) -> None:
     """
     Building of bowtie2 index (.bt2l files) for read alignment.
@@ -22,14 +24,12 @@ def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , ve
         Set wether or not the shell command should be printed, by default False
     """
 
-    logger.info("Start building index for alignment")
+    logger.info("Start building index for alignment.")
 
     try:
-
         sp.check_output(["bowtie2-build", "-h"])
-
+        
     except OSError:
-
         raise RuntimeError(
             "bowtie2-build not found; check if it is installed and in $PATH\n install Bowtie2 with : conda install bowtie2"
         )
@@ -37,7 +37,6 @@ def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , ve
     genome_path = Path(genome)
 
     if not genome_path.is_file():
-        
         raise ValueError(f"Genome file {genome} not found")
 
     if output_dir is None:    
@@ -48,7 +47,6 @@ def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , ve
 
         
     if not output_path.exists():
-
         raise ValueError(f"Output path {output_path} does not exist. Please provide existing ouput path.")
     
     sample = Path(genome).stem
@@ -57,7 +55,6 @@ def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , ve
     cmd_index = f"bowtie2-build -q -f --threads {cpus} --large-index {genome} {index_path}"
 
     if verbose:
-
         logger.info(cmd_index)
 
     sp.run([cmd_index], shell=True)
@@ -66,8 +63,7 @@ def hic_build_index(genome : str, output_dir  : str = None , cpus : int = 1 , ve
 
     return index_path
 
-
-def hic_align(index : str, fq_for : str, fq_rev : str, sensitivity : str = 'very-sensitive', max_alignment :  int = None, cpus : int = 1, output_dir : str = None, verbose : bool = False) -> None:
+def hic_align(index : str, fq_for : str, fq_rev : str, sensitivity : str = 'very-sensitive-local', max_alignment :  int = None, trim5 :  int = 0, cpus : int = 1, output_dir : str = None, verbose : bool = False) -> None:
     """
     Alignment of reads from HiC experiments along an indexed genome.
 
@@ -80,9 +76,11 @@ def hic_align(index : str, fq_for : str, fq_rev : str, sensitivity : str = 'very
     fq_rev : str
         Path to .fasta containing set of reads to align (forward mate).
     sensitivity : str, optional
-        Sensitivity of the alignment., by default 'very_sensitive'
+        Sensitivity of the alignment., by default 'very_sensitive-local'
     max_alignment : int, optional
         Maximum number of alignments to be returned, by default None
+    trim5 :  int, optional
+        Trim <int> bases from 5' (left) end of each read before alignment (default: 0)
     cpus : int, optional
         Number of threads allocated for the alignment, by default 1
     output_dir : str, optional
@@ -96,7 +94,6 @@ def hic_align(index : str, fq_for : str, fq_rev : str, sensitivity : str = 'very
     fq_for_path, fq_rev_path  = Path(fq_for), Path(fq_rev)
 
     if not fq_for_path.is_file() or not fq_rev_path.is_file():
-
         raise IOError(f"Wrong path to fastq files : {fq_for_path} or {fq_rev_path} given. \
                     Pease provide existing files.")
     
@@ -107,23 +104,19 @@ def hic_align(index : str, fq_for : str, fq_rev : str, sensitivity : str = 'very
         output_path = Path(output_dir)
 
     if not output_path.exists():
-
         raise ValueError(f"Output path {output_path} does not exist. Please provide existing output path.")
 
     index_path = Path(output_path / index)
 
     if max_alignment is None or max_alignment == -1:
-        
-        cmd_alignment_rev = f"bowtie2 --{sensitivity} -p {cpus} -a -x {index_path} -S {output_path / '2.sam'} {fq_for}"
-        cmd_alignment_for = f"bowtie2 --{sensitivity} -p {cpus} -a -x {index_path} -S {output_path / '1.sam'} {fq_rev}"
+        cmd_alignment_for = f"bowtie2 --{sensitivity} -p {cpus} -5 {trim5} -a -x {index_path} -S {output_path / '1.sam'} {fq_for}"
+        cmd_alignment_rev = f"bowtie2 --{sensitivity} -p {cpus} -5 {trim5} -a -x {index_path} -S {output_path / '2.sam'} {fq_rev}"
 
     elif max_alignment is not None:
-            
-        cmd_alignment_for = f"bowtie2 --{sensitivity} -p {cpus} -k {max_alignment}  -p {cpus}  -x {index_path} -S {output_path / '1.sam'} {fq_for}"
-        cmd_alignment_rev = f"bowtie2 --{sensitivity} -p {cpus} -k {max_alignment}  -p {cpus}  -x {index_path} -S {output_path / '2.sam'} {fq_rev}"
+        cmd_alignment_for = f"bowtie2 --{sensitivity} -p {cpus} -5 {trim5} -k {max_alignment} -x {index_path} -S {output_path / '1.sam'} {fq_for}"
+        cmd_alignment_rev = f"bowtie2 --{sensitivity} -p {cpus} -5 {trim5} -k {max_alignment} -x {index_path} -S {output_path / '2.sam'} {fq_rev}"
 
     if verbose :
-
         logger.info(cmd_alignment_for)
         logger.info(cmd_alignment_rev)
 
@@ -165,14 +158,10 @@ def hic_view(sam_for : str = "1.sam", sam_rev : str = "2.sam", cpus : int = 1, o
     logger.info("Start converting .sam to .bam")
 
     try:
-
         sp.check_output(["samtools", "--help"])
 
     except OSError:
-
-        raise RuntimeError(
-            "Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools"
-        )
+        raise RuntimeError("Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools")
 
     if output_dir is None:    
         output_path = Path(getcwd())
@@ -188,7 +177,6 @@ def hic_view(sam_for : str = "1.sam", sam_rev : str = "2.sam", cpus : int = 1, o
     cmd_view_rev = f"samtools view -h  -b {output_path / sam_rev} -o {output_path / '2.bam'} --threads {cpus}"
 
     if verbose:
-
         logger.info(cmd_view_for)
         logger.info(cmd_view_rev)
 
@@ -223,14 +211,10 @@ def hic_sort(bam_for : str = "1.bam", bam_rev : str = "2.bam", cpus : int = 1, o
     logger.info("Start sorting .bam alignment files")
 
     try:
-
         sp.check_output(["samtools", "--help"])
 
     except OSError:
-
-        raise RuntimeError(
-            "Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools"
-        )
+        raise RuntimeError("Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools")
 
     if output_dir is None:    
         output_path = Path(getcwd())
@@ -239,7 +223,6 @@ def hic_sort(bam_for : str = "1.bam", bam_rev : str = "2.bam", cpus : int = 1, o
         output_path = Path(output_dir)
 
     if not output_path.exists():
-
         raise ValueError(f"Output path {output_path} does not exist. Please provide existing ouput path.")
     
     id_for = uuid.uuid4()
@@ -262,7 +245,6 @@ def hic_sort(bam_for : str = "1.bam", bam_rev : str = "2.bam", cpus : int = 1, o
 
     logger.info(f"Sorted alignment done at {output_path}")
 
-
 def hic_index(bam_for : str = "1.sorted.bam", bam_rev : str = "2.sorted.bam", cpus : int = 1, output_dir : str = None, verbose : bool = False) -> None:
     """
     Index a coordinate-sorted BGZIP-compressed SAM, BAM or CRAM file for fast random access.
@@ -283,14 +265,10 @@ def hic_index(bam_for : str = "1.sorted.bam", bam_rev : str = "2.sorted.bam", cp
     """
 
     try:
-
         sp.check_output(["samtools", "--help"])
 
     except OSError:
-
-        raise RuntimeError(
-            "Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools"
-        )
+        raise RuntimeError("Samtools not found; check if it is installed and in $PATH\n install Samtools with : conda install samtools")
 
     if output_dir is None:    
         output_path = Path(getcwd())

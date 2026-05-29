@@ -2,14 +2,13 @@ import time
 import uuid
 import subprocess as sp
 from glob import glob
-import subprocess as sp
 import shutil as sh
 from os import getcwd, mkdir
 from pathlib import Path
 import multiprocessing
 from functools import partial
 import itertools
-
+from scipy.stats import pearsonr
 from typing import Iterator, Tuple, List
 
 import numpy as np
@@ -17,6 +16,9 @@ from numpy.random import choice
 import pandas as pd
 import scipy.stats as st
 from scipy.stats import median_abs_deviation
+from scipy.ndimage import generic_filter
+from scipy.ndimage import label, find_objects
+from scipy.sparse import csr_matrix
 
 import pysam
 from Bio import SeqIO
@@ -28,35 +30,9 @@ import matplotlib.gridspec as gridspec
 import hicberg.io as hio
 import hicberg.statistics as hst
 from hicberg import logger
-
-def sum_mat_bins(matrix : np.array) -> np.array:
-    """
-    Adapted from : https://github.com/koszullab/hicstuff/tree/master/hicstuff
-    Compute the sum of matrices bins (i.e. rows or columns) using
-    only the upper triangle, assuming symmetrical matrices.
-
-    Parameters
-    ----------
-    mat : scipy.sparse.coo_matrix
-        Contact map in sparse format, either in upper triangle or
-        full matrix.
-
-    Returns
-    -------
-    numpy.ndarray :
-        1D array of bin sums.
-    """
-    # Equivalaent to row or col sum on a full matrix
-    # Note: mat.sum returns a 'matrix' object. A1 extracts the 1D flat array
-    # from the matrix
-
-    if matrix.shape[0] == matrix.shape[1]:
-
-        return matrix.sum(axis=0) + matrix.sum(axis=1) - matrix.diagonal(0)
-    
-    else :
-
-        return matrix.sum(axis=0), matrix.sum(axis=1)
+import statsmodels.api as sm
+from scipy.interpolate import interp1d
+from scipy.optimize import isotonic_regression
 
 def generate_gaussian_kernel(size : int = 1, sigma : int = 2) -> np.array:
     """
@@ -81,41 +57,125 @@ def generate_gaussian_kernel(size : int = 1, sigma : int = 2) -> np.array:
 
     return kern2d / kern2d.sum()
 
-def detrend_matrix(matrix : np.array) -> np.array:
+def distance_law(matrix, detectable_bins=None, max_dist=None, smooth=True, fun=np.nanmean):
     """
-    Detrend a matrix by P(s).
+    Computes genomic distance law by averaging over each diagonal in the upper
+    triangle matrix. If a list of detectable bins is provided, pixels in
+    missing bins will be excluded from the averages. A maximum distance can be
+    specified to define how many diagonals should be computed.
 
-    Parameters
+    parameters
     ----------
-    matrix : np.array
-        Hi-C matrix to detrend.
+    matrix: scipy.sparse.csr_matrix
+        the input matrix to compute distance law from.
+    detectable_bins : numpy.ndarray of ints
+        An array of detectable bins indices to consider when computing
+        distance law.
+    max_dist : int
+        Maximum distance from diagonal, in number of bins in which to compute
+        distance law
+    smooth : bool
+        Whether to use isotonic regression to smooth the distance law.
+    fun : callable
+        A function to apply on each diagonal. Defaults to mean.
 
     Returns
     -------
-    np.array
-        Detrended Hi-C matrix.
+    dist: np.ndarray
+        the output genomic distance law.
+
+    example
+    -------
+        >>> m = np.ones((3,3))
+        >>> m += np.array([1,2,3])
+        >>> m
+        array([[2., 3., 4.],
+               [2., 3., 4.],
+               [2., 3., 4.]])
+        >>> distance_law(csr_matrix(m))
+        array([3. , 3.5, 4. ])
+
     """
-    zeros_indexes = np.where(matrix == 0)
-    matrix[zeros_indexes] = np.nan
+    mat_n = matrix.shape[0]
+    if max_dist is None:
+        max_dist = mat_n
+    n_diags = min(mat_n, max_dist + 1)
+    dist = np.zeros(mat_n)
+    if detectable_bins is None:
+        detectable_bins = np.array(range(mat_n))
 
-    # Cis case
-    if matrix.shape[0] == matrix.shape[1]:
+    for diag in range(n_diags):
+        # Find detectable which fall in diagonal
+        detect_mask = np.zeros(mat_n, dtype=bool)
+        detect_mask[detectable_bins] = 1
+        # Find bins which are detectable in the diagonal (intersect of
+        # hori and verti)
+        detect_mask_h = detect_mask[: (mat_n - diag)]
+        detect_mask_v = detect_mask[mat_n - (mat_n - diag) :]
+        detect_mask_diag = detect_mask_h & detect_mask_v
+        detect_diag = matrix.diagonal(diag)[detect_mask_diag]
+        dist[diag] = fun(detect_diag[detect_diag > 0])
+    # Smooth the curve using isotonic regression: Find closest approximation
+    # with the condition that point n+1 cannot be higher than point n.
+    # (i.e. contacts can only decrease when increasing distance)
+    # if smooth and mat_n > 2:
+        # ir = IsotonicRegression(increasing=False)
+        # dist = ir.fit_transform(range(len(dist)), dist)
+        
+        # to adapt
+        # dist = isotonic_regression(dist, increasing=False)
+        # dist[~np.isfinite(dist)] = 0
 
-        detrended_matrix = np.zeros(matrix.shape)
+    return dist
 
-        np.fill_diagonal(detrended_matrix, np.diag(matrix) / np.nanmean(np.diag(matrix)))
+def detrend(matrix,detectable_bins=None,max_dist=None,smooth=False,fun=np.nanmean,max_val=10):
+    """
+    Detrends a Hi-C matrix by the distance law.
+    The input matrix should have been normalised beforehandand.
 
-        for i in range(1, matrix.shape[0]):
-            diagonal_mean = np.nanmean(np.diagonal(matrix, i))
-            np.fill_diagonal(detrended_matrix[i:, 0:-i], np.diag(matrix[i:, 0:-i]) / diagonal_mean)
-            np.fill_diagonal(detrended_matrix[0:-i, i:], np.diag(matrix[0:-i, i:]) / diagonal_mean)
+    Parameters
+    ----------
+    matrix : scipy.sparse.csr_matrix
+        The normalised intrachromosomal Hi-C matrix to detrend.
+    detectable_bins : tuple
+        Tuple containing a list of detectable rows and a list of columns on
+        which to perform detrending. Poorly interacting indices have been
+        excluded.
+    max_dist : int
+        Maximum number of bins from the diagonal at which to compute trend.
+    smooth : bool
+        Whether to use isotonic regression to smooth the trend.
+    fun : callable
+        Function to use on each diagonal to compute the trend.
+    max_val : float or None
+        Maximum value in the detrended matrix. Set to None to disable
 
-    # Trans case
-    else:   
-        expected_value = np.nanmedian(matrix)
-        detrended_matrix = matrix / expected_value
-
-    return detrended_matrix
+    Returns
+    -------
+    numpy.ndarray :
+        The detrended Hi-C matrix.
+    """
+    matrix = matrix.tocsr()
+    y = distance_law(
+        matrix,
+        detectable_bins=detectable_bins,
+        max_dist=max_dist,
+        smooth=smooth,
+        fun=fun,
+    )
+    y[np.isnan(y)] = 0.0
+    # Detrending by the distance law
+    clean_mat = matrix.tocoo()
+    # clean_mat.data /= y_savgol[abs(clean_mat.row - clean_mat.col)]
+    try:
+        clean_mat.data = clean_mat.data / y[abs(clean_mat.row - clean_mat.col)]
+    # If no nonzero value in matrix, do nothing
+    except TypeError:
+        pass
+    clean_mat = clean_mat.tocsr()
+    if max_val is not None:
+        clean_mat[clean_mat >= max_val] = 1
+    return clean_mat
 
 def get_bad_bins(matrix : np.array = None, n_mads : int = 2) -> np.array:
     """
@@ -153,7 +213,8 @@ def get_bad_bins(matrix : np.array = None, n_mads : int = 2) -> np.array:
         y_bad_indexes = np.where(y_sum_bins == 0) 
 
         return (x_bad_indexes, y_bad_indexes)
-    
+ 
+# not used anymore    
 def nan_conv(matrix : np.array = None, kernel : np.array = None, nan_threshold : bool = False) -> np.array:
     """
     Custom convolution function that takes into account nan values when convolving.
@@ -226,8 +287,57 @@ def nan_conv(matrix : np.array = None, kernel : np.array = None, nan_threshold :
 
     return mat_cp
 
+def nanmean_filter(values):
+    vals = values[~np.isnan(values)]
+    return np.mean(vals) if len(vals) > 0 else np.nan
 
-def get_local_density(cooler_file : str = None, chrom_name : tuple = (None, None), size : int = 11, sigma : int = 0.2, n_mads : int = 2, nan_threshold : bool = False) -> np.array:
+def iterative_fill(Z, patch_size=10, max_iter=10):
+    Z_filled = Z.copy()
+    for i in range(max_iter):
+        nan_count = np.isnan(Z_filled).sum()
+        if nan_count == 0:
+            break
+        Z_new = generic_filter(Z_filled, nanmean_filter, size=patch_size, mode='mirror')
+        # On ne remplit que les NaN à chaque itération
+        Z_filled[np.isnan(Z_filled)] = Z_new[np.isnan(Z_filled)]
+        print(f"Iteration {i+1}: {nan_count} NaN restants")
+    return Z_filled
+
+def estimate_nan_patch_sizes(Z, border_ignore=True, border=1):
+    nan_mask = np.isnan(Z)
+    
+    # Optionnel : ignorer les NaN collés aux bords
+    if border_ignore:
+        core_mask = np.ones_like(Z, dtype=bool)
+        core_mask[:border, :] = False
+        core_mask[-border:, :] = False
+        core_mask[:, :border] = False
+        core_mask[:, -border:] = False
+        nan_mask = nan_mask & core_mask
+    
+    labeled, n = label(nan_mask)
+    if n == 0:
+        print("Aucune zone NaN interne détectée.")
+        return None, None, None, None
+    
+    regions = find_objects(labeled)
+    sizes = [(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) for sl in regions]
+
+    mean_h = np.mean([h for h, _ in sizes])
+    mean_w = np.mean([w for _, w in sizes])
+    max_h  = np.max([h for h, _ in sizes])
+    max_w  = np.max([w for _, w in sizes])
+
+    print(f"Taille moyenne des trous : {mean_h:.1f} x {mean_w:.1f}")
+    print(f"Taille max des trous : {max_h} x {max_w}")
+
+    patch_small = int(np.clip(min(mean_h, mean_w) / 2, 3, 20))
+    patch_large = int(np.clip(max(max_h, max_w) * 0.8, 10, 100))
+    print(f"Patch_small ≈ {patch_small}, patch_large ≈ {patch_large}")
+
+    return patch_small, patch_large, (mean_h, mean_w), (max_h, max_w)
+
+def get_local_density(cooler_file : str = None, chrom_name : tuple = (None, None), nan_threshold : bool = False) -> np.array:
     """
     Create density map from a Hi-C matrix. Return a dictionary where keys are chromosomes names and values are density maps.
     Density is obtained by getting the local density of each pairwise bin using a gaussian kernel convolution.
@@ -235,78 +345,68 @@ def get_local_density(cooler_file : str = None, chrom_name : tuple = (None, None
     Parameters
     ----------
     cooler_file : str, optional
-        Path to Hi-C matrix (or sub-matrix) to dget density from, by default None, by default None
+        Path to Hi-C matrix (or sub-matrix) to get density from, by default None
     chrom_name : tuple, optional
         Tuple containing the sub-matrix to fetch, by default (None, None)
-    size : int, optional
-        Size of the gaussian kernel to use, by default 5
-    sigma : int, optional
-        Standard deviation to use for the kernel, by default 2
-    n_mads : int, optional
-        Number of median absolute deviations to set poor interacting bins threshold, by default 2
     nan_threshold : bool, optional
         Set wether or not convolution return nan if not enough value are caught, by default None
 
     Returns
     -------
     np.array
-        Map of local contact density.
+        Density contact map.
     """
 
-    if size % 2 == 0:
-        raise ValueError("Kernel size must be odd")
-
     #Load cooler file
-    matrix = cooler.Cooler(cooler_file).matrix(balance = True).fetch(chrom_name[0], chrom_name[1])
+    chr1=chrom_name[0]
+    chr2=chrom_name[1]
+    mat = cooler.Cooler(cooler_file).matrix(balance = True).fetch(chr1, chr2)
 
-
-    mat_cp = matrix.copy().astype(float)
-
-    if mat_cp.shape[0] < size:
-        size = size - 2 * (size // 2)
-
-    bad_bins = get_bad_bins(mat_cp, n_mads = n_mads)
+    # Detrending of p(s)
+    if chr1==chr2:
+        mat = csr_matrix(mat)
+        mat= mat.tocoo()
+        mat=detrend(mat)
+        mat=mat.todense()
     
-    detrended_matrix = detrend_matrix(mat_cp)
+    nan_mask = np.isnan(mat)
+    labeled, n = label(nan_mask)  # detection of empty areas
+    regions = find_objects(labeled)
+    
+    nan_by_row = np.isnan(mat).mean(axis=1)
+    nan_by_col = np.isnan(mat).mean(axis=0)
+    
+    approx_band_height = np.mean([
+        np.sum(nan_by_row > 0.5)  # lines with at least 50% of Nan
+    ])
+    approx_band_width = np.mean([
+        np.sum(nan_by_col > 0.5)
+    ])
+    
+    # print(f"Largeur bandes ~{approx_band_width:.1f}, hauteur bandes ~{approx_band_height:.1f}")
+    
+    patch_small = int(np.clip(min(approx_band_height, approx_band_width)/2, 5, 15))
+    patch_large = int(np.clip(max(approx_band_height, approx_band_width)*1.5, 15, 80))
+    
+    if chr1==chr2:
+        patch_large =  15
+    
+    print(f"Patch_small ≈ {patch_small}, patch_large ≈ {patch_large}")
+    
+    mat_tmp = iterative_fill(mat, patch_size=patch_small, max_iter=5)
+    mat_filled = generic_filter(mat_tmp, nanmean_filter, size=patch_large, mode='mirror')
+    
+    # replacement of zeros with the non zero minimum
+    min_non_zero= np.min(mat_filled[mat_filled !=0])
+    mat_filled[mat_filled ==0]= min_non_zero
+    
+    if chr1==chr2:
+        np.fill_diagonal(mat_filled, 1)   # we stay neutral on the inner diagonale 
+    
+    if chr1!=chr2:
+        mat_filled = mat_filled / np.mean(mat_filled)
 
-
-    log_detrended_matrix = np.log(detrended_matrix)
-
-    if detrended_matrix.shape[0] == detrended_matrix.shape[1]:
-
-        log_detrended_matrix[bad_bins, :] = np.nan
-        log_detrended_matrix[:, bad_bins] = np.nan
-
-    else :
-
-        log_detrended_matrix[bad_bins[1], :] = np.nan
-        log_detrended_matrix[:, bad_bins[0]] = np.nan
-
-
-    kernel = generate_gaussian_kernel(size = size, sigma = sigma)
-    log_density = nan_conv(matrix = log_detrended_matrix, kernel = kernel, nan_threshold = nan_threshold)
-
-    density = np.exp(log_density)
-
-    # Edge cases correction
-    if density.shape[0] == density.shape[1]:
-
-        edges = np.where(np.isnan(density))
-
-        for i, j in zip(edges[0], edges[1]):
-
-            # TODO : replace by 1 ?
-            density[i, j] =  np.nanmean(np.diag(density, k = i - j)) if ~np.isnan(np.nanmean(np.diag(density, k = i - j ))) else np.nanmean(density)
-
-    else : 
-        edges = np.where(np.isnan(density))
-
-        for i, j in zip(edges[0], edges[1]):
-
-            density[i, j] =  np.nanmedian(density)
-            
-    return (chrom_name, density)
-
+    return (chrom_name, mat_filled)
 
 def get_chromosomes_sizes(genome : str = None, output_dir : str = None) -> None:
     """
@@ -322,19 +422,15 @@ def get_chromosomes_sizes(genome : str = None, output_dir : str = None) -> None:
     """
 
     logger.info(f"Start getting chromosome sizes")
-
     genome_path = Path(genome)
 
     if not genome_path.is_file():
-
         raise IOError(f"Genome file {genome_path.name} not found. Please provide a valid path.")
 
     if output_dir is None:
-
         folder_path = Path(getcwd())
 
     else:
-
         folder_path = Path(output_dir)
 
     chrom_sizes = {}
@@ -342,15 +438,13 @@ def get_chromosomes_sizes(genome : str = None, output_dir : str = None) -> None:
     output_file = folder_path / "chromosome_sizes.npy"
 
     for rec in SeqIO.parse(genome_path,"fasta"):
-
         chrom_sizes[rec.id] = len(rec.seq)
 
     np.save(output_file, chrom_sizes)
 
     logger.info(f"Chromosome sizes have been saved in {output_file}")
 
-
-def get_bin_table(chrom_sizes_dict : str = "chromosome_sizes.npy", bins : int = 2000, output_dir : str = None) -> None:
+def get_bin_table(chrom_sizes_dict : str = "chromosome_sizes.npy", bin_size : int = 2000, output_dir : str = None) -> None:
     """
     Create bin table containing start and end position for fixed size bin per chromosome.
 
@@ -358,22 +452,19 @@ def get_bin_table(chrom_sizes_dict : str = "chromosome_sizes.npy", bins : int = 
     ----------
     chrom_sizes_dict : str
         Path to a dictionary containing chromosome sizes as {chromosome : size} saved in .npy format. By default chromosome_sizes.npy
-    bins : int
+    bin_size : int
         Size of the desired bin, by default 2000.
     output_dir : str, optional
         Path to the folder where to save the dictionary, by default None
     """
 
     logger.info(f"Start getting bin table")
-
     chrom_sizes_dict_path = Path(output_dir, chrom_sizes_dict)
 
     if not chrom_sizes_dict_path.is_file():
-
         raise IOError(f"Genome file {chrom_sizes_dict_path.name} not found. Please provide a valid path.")
 
     if output_dir is None:
-
         folder_path = Path(getcwd())
 
     else:
@@ -392,19 +483,19 @@ def get_bin_table(chrom_sizes_dict : str = "chromosome_sizes.npy", bins : int = 
             curr_chr, curr_length = chrom, length
             chr_count += 1
 
-            if (curr_length % bins) == 0:
+            if (curr_length % bin_size) == 0:
                     interval_end = curr_length
             else:
-                interval_end = (int((curr_length + bins) / bins)) * bins
+                interval_end = (int((curr_length + bin_size) / bin_size)) * bin_size
 
-                for val in range(0, interval_end, bins):
+                for val in range(0, interval_end, bin_size):
                     curr_start = val
 
-                    if val + bins > curr_length:
+                    if val + bin_size > curr_length:
 
                         curr_end = curr_length
                     else:
-                        curr_end = val + bins
+                        curr_end = val + bin_size
                     if (chr_count > 1) or (val > 0):
                         f_out.write("\n")
                     f_out.write(
@@ -419,7 +510,7 @@ def get_bin_table(chrom_sizes_dict : str = "chromosome_sizes.npy", bins : int = 
         # close the output fragment file
         f_out.close()
 
-def is_duplicated(read : pysam.AlignedSegment) -> bool:
+def is_ambiguous(read : pysam.AlignedSegment) -> bool:
     """
     Check if read from pysam AlignmentFile is mapping more than once along the genome.
 
@@ -431,7 +522,7 @@ def is_duplicated(read : pysam.AlignedSegment) -> bool:
     Returns
     -------
     bool
-        True if the read is duplicated i.e. mapping to more than one position.
+        True if the read is ambiguous i.e. mapping to more than one position.
     """    
 
     if "XS" in [x[0] for x in read.get_tags()]:
@@ -456,33 +547,10 @@ def is_poor_quality(read : pysam.AlignedSegment, mapq : int) -> bool:
     bool
         True if the read quality is below mapq threshold.
     """    
-    if 0 < read.mapping_quality < mapq:
+    if read.mapping_quality < mapq:
         return True
 
     else:
-        return False
-
-def is_unqualitative(read : pysam.AlignedSegment) -> bool:
-    """
-    Check if the read is not qualitative.
-
-    Parameters
-    ----------
-    read : pysam.AlignedSegment
-        pysam AlignedSegment object.
-
-    Returns
-    -------
-    bool
-        True if the read is not qualitative, False otherwise.
-    """
-
-    if read.mapping_quality == 0:
-
-        return True
-
-    else:
-
         return False
 
 def is_unmapped(read : pysam.AlignedSegment) -> bool:
@@ -501,7 +569,6 @@ def is_unmapped(read : pysam.AlignedSegment) -> bool:
     """    
     if read.flag == 4:
         return True
-
     else:
         return False
 
@@ -522,16 +589,18 @@ def is_reverse(read : pysam.AlignedSegment) -> bool:
 
     if read.flag == 16 or read.flag == 272:
         return True
-
     else:
         return False
 
-def classify_reads(bam_couple : tuple[str, str] = ("1.sorted.bam", "2.sorted.bam"), chromosome_sizes : str = "chromosome_sizes.npy", mapq : int = 35, output_dir : str = None) -> None:
+def classify_reads(bam_couple: tuple[str, str] = ("1.sorted.bam", "2.sorted.bam"), 
+                   chromosome_sizes: str = "chromosome_sizes.npy", 
+                   mapq: int = 30, 
+                   output_dir: str = None) -> None:
     """
     Classification of pairs of reads in 2 different groups:
         Group 0) --> (Unmappable) - files :group0.1.bam and group0.2.bam
         Group 1) --> (Uniquely Mapped  Uniquely Mapped) - files :group1.1.bam and group1.2.bam
-        Group 2) --> (Uniquely Mapped Multi Mapped) or (Multi Mapped  Multi Mapped).- files :group2.1.bam and group2.2.bam
+        Group 2) --> (Uniquely Mapped with Multi Mapped) or (Multi Mapped with  Multi Mapped).- files : group2.1.bam and group2.2.bam
 
     Parameters
     ----------
@@ -545,117 +614,97 @@ def classify_reads(bam_couple : tuple[str, str] = ("1.sorted.bam", "2.sorted.bam
         Path to the folder where to save the classified alignment files, by default None
     """
 
-    forward_bam_file_path, reverse_bam_file_path = Path(output_dir, bam_couple[0]), Path(output_dir, bam_couple[1])
+    # ✅ Bug fix : vérifier output_dir AVANT de l'utiliser
+    if output_dir is None:
+        output_dir = Path(getcwd())
+    else:
+        output_dir = Path(output_dir)
 
+    forward_bam_file_path = Path(output_dir, bam_couple[0])
+    reverse_bam_file_path = Path(output_dir, bam_couple[1])
     chromosome_sizes_path = Path(output_dir, chromosome_sizes)
 
     if not forward_bam_file_path.is_file():
-
         raise IOError(f"Forward alignment file {forward_bam_file_path.name} not found. Please provide a valid path.")
-
     if not reverse_bam_file_path.is_file():
-            
-            raise IOError(f"Reverse alignment file {reverse_bam_file_path.name} not found. Please provide a valid path.")
-    
+        raise IOError(f"Reverse alignment file {reverse_bam_file_path.name} not found. Please provide a valid path.")
     if not chromosome_sizes_path.is_file():
-            
-            raise IOError(f"Chromosome sizes file {chromosome_sizes_path.name} not found. Please provide a valid path.")
-    
-    if output_dir is None:
-            
-            output_dir = Path(getcwd())
-    else:
-
-        output_dir = Path(output_dir)
+        raise IOError(f"Chromosome sizes file {chromosome_sizes_path.name} not found. Please provide a valid path.")
 
     chromosome_sizes_dic = hio.load_dictionary(chromosome_sizes_path)
 
-    #opening files to parse
     forward_bam_file = pysam.AlignmentFile(forward_bam_file_path, "rb")
     reverse_bam_file = pysam.AlignmentFile(reverse_bam_file_path, "rb")
 
-    #retrieve headers
     forward_header = forward_bam_file.header
     reverse_header = reverse_bam_file.header
 
-    # create iterators
     forward_bam_file_iter = bam_iterator(forward_bam_file_path)
     reverse_bam_file_iter = bam_iterator(reverse_bam_file_path)
 
-    unmapped_bam_file_foward = pysam.AlignmentFile(output_dir / f"group0.1.bam", "wb", template = forward_bam_file, header = forward_header)
-    unmapped_bam_file_reverse = pysam.AlignmentFile(output_dir / f"group0.2.bam", "wb", template = reverse_bam_file, header = reverse_header)
+    unmapped_bam_file_foward = pysam.AlignmentFile(output_dir / "group0.1.bam", "wb", template=forward_bam_file, header=forward_header)
+    unmapped_bam_file_reverse = pysam.AlignmentFile(output_dir / "group0.2.bam", "wb", template=reverse_bam_file, header=reverse_header)
+    uniquely_mapped_bam_file_foward = pysam.AlignmentFile(output_dir / "group1.1.bam", "wb", template=forward_bam_file, header=forward_header)
+    uniquely_mapped_bam_file_reverse = pysam.AlignmentFile(output_dir / "group1.2.bam", "wb", template=reverse_bam_file, header=reverse_header)
+    multi_mapped_bam_file_foward = pysam.AlignmentFile(output_dir / "group2.1.bam", "wb", template=forward_bam_file, header=forward_header)
+    multi_mapped_bam_file_reverse = pysam.AlignmentFile(output_dir / "group2.2.bam", "wb", template=reverse_bam_file, header=reverse_header)
 
-    uniquely_mapped_bam_file_foward = pysam.AlignmentFile(output_dir / f"group1.1.bam", "wb", template = forward_bam_file, header = forward_header)
-    uniquely_mapped_bam_file_reverse = pysam.AlignmentFile(output_dir / f"group1.2.bam", "wb", template = reverse_bam_file, header = reverse_header)
-
-    multi_mapped_bam_file_foward = pysam.AlignmentFile(output_dir / f"group2.1.bam", "wb", template = forward_bam_file, header = forward_header)
-    multi_mapped_bam_file_reverse = pysam.AlignmentFile(output_dir / f"group2.2.bam", "wb", template = reverse_bam_file, header = reverse_header)
-
+    nb_unmapped_couples, nb_multi_mapped_couples, nb_unique_couples = 0, 0, 0
     nb_unmapped_reads_forward, nb_unmapped_reads_reverse = 0, 0
     nb_uniquely_mapped_reads_forward, nb_uniquely_mapped_reads_reverse = 0, 0
     nb_multi_mapped_reads_forward, nb_multi_mapped_reads_reverse = 0, 0
 
     for forward_block, reverse_block in zip(forward_bam_file_iter, reverse_bam_file_iter):
 
-        unmapped_couple, multi_mapped_couple = False, False
+        # ✅ Classification O(N+M) au lieu de O(N×M)
+        unmapped_couple = any(
+            is_unmapped(r) for r in itertools.chain(forward_block, reverse_block)
+        )
 
-        forward_reverse_combinations = list(itertools.product(tuple(forward_block), tuple(reverse_block)))
+        multi_mapped_couple = False
+        if not unmapped_couple:
+            multi_mapped_couple = any(
+                is_ambiguous(r) or is_poor_quality(r, mapq)
+                for r in itertools.chain(forward_block, reverse_block)
+            )
 
-        for combination in forward_reverse_combinations:
+        # ✅ Sélection des handlers et compteurs UNE SEULE FOIS par bloc
+        if unmapped_couple:
+            out_for, out_rev = unmapped_bam_file_foward, unmapped_bam_file_reverse
+            nb_unmapped_couples += 1
+            nb_unmapped_reads_forward += len(forward_block)
+            nb_unmapped_reads_reverse += len(reverse_block)
+            add_tag = False
 
-            if  is_unmapped(combination[0])  or is_unmapped(combination[1]):
+        elif multi_mapped_couple:
+            out_for, out_rev = multi_mapped_bam_file_foward, multi_mapped_bam_file_reverse
+            nb_multi_mapped_couples += 1
+            nb_multi_mapped_reads_forward += len(forward_block)
+            nb_multi_mapped_reads_reverse += len(reverse_block)
+            add_tag = True
 
-                unmapped_couple = True
+        else:
+            out_for, out_rev = uniquely_mapped_bam_file_foward, uniquely_mapped_bam_file_reverse
+            nb_unique_couples += 1
+            nb_uniquely_mapped_reads_forward += len(forward_block)
+            nb_uniquely_mapped_reads_reverse += len(reverse_block)
+            add_tag = True
 
-                break
-
-            if is_duplicated(combination[0]) or is_poor_quality(combination[0], mapq) or is_duplicated(combination[1]) or is_poor_quality(combination[1], mapq):
-
-                multi_mapped_couple = True
-                
-                break
-
+        # ✅ Écriture sans if-elif-else répétés dans la boucle
         for forward_read in forward_block:
-
-            if unmapped_couple :
-
-                unmapped_bam_file_foward.write(forward_read)
-                nb_unmapped_reads_forward += 1
-
-            elif multi_mapped_couple:
-
+            if add_tag:
                 forward_read.set_tag("XG", chromosome_sizes_dic[forward_read.reference_name])
-                multi_mapped_bam_file_foward.write(forward_read)
-                nb_multi_mapped_reads_forward += 1
-
-            else: 
-
-                forward_read.set_tag("XG", chromosome_sizes_dic[forward_read.reference_name])
-                uniquely_mapped_bam_file_foward.write(forward_read)
-                nb_uniquely_mapped_reads_forward += 1
+            out_for.write(forward_read)
 
         for reverse_read in reverse_block:
-
-            if unmapped_couple:
-
-                unmapped_bam_file_reverse.write(reverse_read)
-                nb_unmapped_reads_reverse += 1
-
-            elif multi_mapped_couple:
-
+            if add_tag:
                 reverse_read.set_tag("XG", chromosome_sizes_dic[reverse_read.reference_name])
-                multi_mapped_bam_file_reverse.write(reverse_read)
-                nb_multi_mapped_reads_reverse += 1
+            out_rev.write(reverse_read)
 
-            else : 
-
-                reverse_read.set_tag("XG", chromosome_sizes_dic[reverse_read.reference_name])
-                uniquely_mapped_bam_file_reverse.write(reverse_read)
-                nb_uniquely_mapped_reads_reverse += 1
-
-    #closing files
+    # Closing files
     forward_bam_file.close()
     reverse_bam_file.close()
+    
     unmapped_bam_file_foward.close()
     unmapped_bam_file_reverse.close()
     uniquely_mapped_bam_file_foward.close()
@@ -663,14 +712,11 @@ def classify_reads(bam_couple : tuple[str, str] = ("1.sorted.bam", "2.sorted.bam
     multi_mapped_bam_file_foward.close()
     multi_mapped_bam_file_reverse.close()
 
-    logger.info(f"Files for the different groups have been saved in {output_dir}")
-    logger.info(f"Number of unmapped reads in forward file : {nb_unmapped_reads_forward}")
-    logger.info(f"Number of unmapped reads in reverse file : {nb_unmapped_reads_reverse}")
-    logger.info(f"Number of uniquely mapped reads in forward file : {nb_uniquely_mapped_reads_forward}")
-    logger.info(f"Number of uniquely mapped reads in reverse file : {nb_uniquely_mapped_reads_reverse}")
-    logger.info(f"Number of multi mapped reads in forward file : {nb_multi_mapped_reads_forward}")
-    logger.info(f"Number of multi mapped reads in reverse file : {nb_multi_mapped_reads_reverse}")
-
+    logger.info(f"Number of unmapped couples     : {nb_unmapped_couples}")
+    logger.info(f"Number of unique couples       : {nb_unique_couples}")
+    logger.info(f"Number of multi-mapped couples : {nb_multi_mapped_couples}")
+    logger.info(f"Number of multi alignments in forward file : {nb_multi_mapped_reads_forward}")
+    logger.info(f"Number of multi alignments in reverse file : {nb_multi_mapped_reads_reverse}")
 
     # Cleaning files after classification
     forward_bam_file_path.unlink()
@@ -694,7 +740,7 @@ def is_intra_chromosome(read_forward : pysam.AlignedSegment, read_reverse : pysa
     """    
 
     if read_forward.query_name != read_reverse.query_name:
-        raise ValueError("Reads are not coming from the same pair")
+        raise ValueError("Reads are not coming from the same pair.")
 
     if read_forward.reference_name == read_reverse.reference_name:
         return True
@@ -718,33 +764,26 @@ def get_ordered_reads(read_forward : pysam.AlignedSegment, read_reverse : pysam.
         The ordered pair of reads in the same chromosome as the two reads.
     """
 
-    if read_forward.query_name != read_reverse.query_name:
-            
+    if read_forward.query_name != read_reverse.query_name:       
         raise ValueError("The two reads must come from the same pair.")
         
     if is_reverse(read_forward):
-
         forward_start = read_forward.reference_end
     
     elif not is_reverse(read_forward):
-                
         forward_start = read_forward.reference_start
 
     if is_reverse(read_reverse):
-            
         reverse_start = read_reverse.reference_end
 
     elif not is_reverse(read_reverse):
-    
         reverse_start = read_reverse.reference_start
 
-    
-    if forward_start <= reverse_start:
-        
+
+    if forward_start <= reverse_start:   
         return (read_forward, read_reverse)
     
     elif forward_start > reverse_start:
-
         return (read_reverse, read_forward)
 
 def is_weird(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSegment) -> bool:
@@ -765,7 +804,6 @@ def is_weird(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSe
     """
     
     if read_forward.query_name != read_reverse.query_name:
-
         raise ValueError("The two reads must be mapped on the same chromosome.")
 
     read_forward, read_reverse = get_ordered_reads(read_forward, read_reverse)
@@ -803,7 +841,6 @@ def is_uncut(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSe
     """
         
     if read_forward.query_name != read_reverse.query_name:
-
         raise ValueError("The two reads must be mapped on the same chromosome.")
     
     read_forward, read_reverse = get_ordered_reads(read_forward, read_reverse)
@@ -817,8 +854,6 @@ def is_uncut(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSe
         return True
     else:
         return False
-
-    
 
 def is_circle(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSegment) -> bool:
     """
@@ -852,6 +887,8 @@ def is_circle(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedS
     else:
         return False
 
+
+
 def get_cis_distance(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSegment, circular : str = "") -> int:
     """
     Calculate the distance between two reads in the same pairwise alignment .
@@ -864,24 +901,26 @@ def get_cis_distance(read_forward : pysam.AlignedSegment, read_reverse : pysam.A
         Reverse read of the pair
     circular : str, optional
         Name of the chromosomes to consider as circular, by default None, by default "".
+        Can be several chrms e.g: chrM,plasmid2micron 
 
     Returns
     -------
     int
         Genomic distance separating the two reads (bp).
 
-    """    
+    """  
+    # convertion into a list 
+    if circular is not None:
+        circular = [e.strip() for e in circular.split(',')]
+    
     if read_forward.query_name != read_reverse.query_name:
         raise ValueError("Reads are not coming from the same pair")
 
     if is_intra_chromosome(read_forward, read_reverse):
-
         read_forward, read_reverse = get_ordered_reads(read_forward, read_reverse)
 
         if is_weird(read_forward, read_reverse):
-            distance = np.abs(
-                np.subtract(read_forward.reference_start, read_reverse.reference_start)
-            )
+            distance = np.abs(np.subtract(read_forward.reference_start, read_reverse.reference_start))
 
         elif is_uncut(read_forward, read_reverse):
             distance = np.abs(np.subtract(read_forward.reference_start, read_reverse.reference_end))
@@ -889,249 +928,195 @@ def get_cis_distance(read_forward : pysam.AlignedSegment, read_reverse : pysam.A
         elif is_circle(read_forward, read_reverse):
             distance = np.abs(np.subtract(read_forward.reference_end, read_reverse.reference_start))
 
-        # circular mode
-        if read_forward.reference_name in circular:
+        # circular case
+        if circular is not None:
+            if read_forward.reference_name in circular:
+                clockwise_distance = distance
+                anti_clockwise_distance = np.subtract(read_forward.get_tag("XG"), distance)
+                distance = np.min([clockwise_distance, anti_clockwise_distance])
 
-            clockwise_distance = distance
-            anti_clockwise_distance = np.subtract(read_forward.get_tag("XG"), distance)
-            return np.min([clockwise_distance, anti_clockwise_distance])
-
-        # linear mode
-        else:
-            return distance
+        return distance
 
 
-def bam_iterator(bam_file : str = None) -> Iterator[pysam.AlignedSegment]:
+def bam_iterator(bam_file: str = None) -> Iterator[List[pysam.AlignedSegment]]:
     """
     Returns an iterator for the given SAM/BAM file (must be query-sorted).
-    In each call, the alignments of a single read are yielded as a 3-tuple: (list of primary pysam.AlignedSegment, list of supplementary pysam.AlignedSegment, list of secondary pysam.AlignedSegment).
+    In each call, the alignments of a single read are yielded as a list of
+    pysam.AlignedSegment objects sharing the same query name.
 
     Parameters
     ----------
-    bam : [str]
+    bam_file : str
         Path to alignment file in .sam or .bam format.
 
     Yields
     -------
-    Iterator[pysam.AlignedSegment]
-        Yields a list containing pysam AlignmentSegment objects, within which all the reads have the same id.
+    Iterator[List[pysam.AlignedSegment]]
+        Yields a list of pysam.AlignedSegment objects sharing the same query name.
     """
 
     bam_path = Path(bam_file)
 
     if not bam_path.is_file():
-
         raise IOError(f"BAM file {bam_path.name} not found. Please provide a valid path.")
 
     with pysam.AlignmentFile(bam_path, "rb") as bam_handler:
-    
-        alignments = bam_handler.fetch(until_eof=True)
-        current_aln = next(alignments)
-        current_read_name = current_aln.query_name
 
-        block = []
-        block.append(current_aln)
+        alignments = bam_handler.fetch(until_eof=True)
+
+        # ✅ Gestion du fichier vide
+        try:
+            current_aln = next(alignments)
+        except StopIteration:
+            logger.warning(f"BAM file {bam_path.name} is empty.")
+            return
+
+        current_read_name = current_aln.query_name
+        block = [current_aln]  # ✅ Style simplifié
 
         while True:
             try:
                 next_aln = next(alignments)
                 next_read_name = next_aln.query_name
-                if next_read_name != current_read_name:
-                    yield (block)
-                    current_read_name = next_read_name
-                    block = []
-                    block.append(next_aln)
 
+                if next_read_name != current_read_name:
+                    yield block
+                    current_read_name = next_read_name
+                    block = [next_aln]  # ✅ Style simplifié
                 else:
                     block.append(next_aln)
+
             except StopIteration:
                 break
 
-        yield (block)
+        # Yield last block
+        yield block
 
-def block_counter(forward_bam_file : str, reverse_bam_file : str) -> Tuple[int, int] : 
+
+def block_counter(forward_bam_file: str, reverse_bam_file: str) -> Tuple[int, int]:
     """
     Return as a tuple the number of blocks in the forward and reverse bam files.
 
     Parameters
     ----------
-    forward_bam_file : str, optional
+    forward_bam_file : str
         Path to forward .bam alignment file.
-    reverse_bam_file : str, optional
+    reverse_bam_file : str
         Path to reverse .bam alignment file.
 
     Returns
     -------
     Tuple[int, int]
         Number of blocks in the forward and reverse bam files.
-    """    
-    
+    """
+
     forward_bam_path = Path(forward_bam_file)
     reverse_bam_path = Path(reverse_bam_file)
 
     if not forward_bam_path.is_file():
-            
         raise IOError(f"BAM file {forward_bam_path.name} not found. Please provide a valid path.")
-    
+
     if not reverse_bam_path.is_file():
-                
         raise IOError(f"BAM file {reverse_bam_path.name} not found. Please provide a valid path.")
 
-    iterator_for, iterator_rev = bam_iterator(forward_bam_path), bam_iterator(reverse_bam_path)
-    nb_blocks_for, nb_blocks_rev = 0, 0
+    # ✅ Comptage indépendant pour détecter les fichiers déséquilibrés
+    nb_blocks_for = sum(1 for _ in bam_iterator(forward_bam_path))
+    nb_blocks_rev = sum(1 for _ in bam_iterator(reverse_bam_path))
 
-    for forward_block, reverse_block in zip(iterator_for, iterator_rev):
+    # ✅ Vérification de la cohérence entre les deux fichiers
+    if nb_blocks_for != nb_blocks_rev:
+        raise ValueError(
+            f"Forward and reverse BAM files have different number of blocks: "
+            f"{nb_blocks_for} vs {nb_blocks_rev}. Files may be corrupted or mismatched."
+        )
 
-        nb_blocks_for += 1
-        nb_blocks_rev += 1
-    
     return (nb_blocks_for, nb_blocks_rev)
 
-def chunk_bam(forward_bam_file : str = "group2.1.bam", reverse_bam_file : str = "group2.2.bam", nb_chunks : int = 2, output_dir : str = None) -> None:
-    """
-    Split a .bam file into chunks .bam files.
-    Parameters
-    ----------
-    forward_bam_file : str, optional
-        Path to forward .bam alignment file, by default group2.1.bam
-    reverse_bam_file : str, optional
-        Path to reverse .bam alignment file, by default group2.2.bam
-    nb_chunks : int, optional
-        Number of chunks to create, by default 2
-    output_dir : str, optional
-        Path to the folder where to save the classified alignment files, by default None
-    """
-    logger.info(f"Start chunking BAM files")
+
+def chunk_bam(forward_bam_file: str = "group2.1.bam", 
+              reverse_bam_file: str = "group2.2.bam", 
+              nb_chunks: int = 2, 
+              output_dir: str = None) -> None:
+
+    logger.info("Start chunking BAM files")
 
     if output_dir is None:
-            
-            output_dir = Path(getcwd())
+        output_dir = Path(getcwd())
     else:
-
         output_dir = Path(output_dir)
 
-    # Create folder for chunks
     chunks_path = output_dir / "chunks"
-
     if chunks_path.is_dir():
         sh.rmtree(chunks_path)
+    mkdir(chunks_path)
 
-    mkdir(output_dir / "chunks")
-
-    forward_bam_path, reverse_bam_path = Path(output_dir, forward_bam_file), Path(output_dir, reverse_bam_file)
+    forward_bam_path = Path(output_dir, forward_bam_file)
+    reverse_bam_path = Path(output_dir, reverse_bam_file)
 
     if not forward_bam_path.is_file():
-            
-        raise IOError(f"BAM file {forward_bam_path.name} not found. Please provide a valid path.")
-    
+        raise IOError(f"BAM file {forward_bam_path.name} not found.")
     if not reverse_bam_path.is_file():
-                
-        raise IOError(f"BAM file {reverse_bam_path.name} not found. Please provide a valid path.")
-    
+        raise IOError(f"BAM file {reverse_bam_path.name} not found.")
+
+    # ✅ Comptage rapide via samtools (appel C, pas d'itération Python)
+    # pysam.view("-c") équivaut à "samtools view -c" → beaucoup plus rapide
+    n_alignments = int(pysam.view("-c", str(forward_bam_path)).strip())
+    target_chunk_size = n_alignments // nb_chunks
+
+    logger.info(f"Total alignments: {n_alignments}, target chunk size: {target_chunk_size}")
+
     forward_bam_handler = pysam.AlignmentFile(forward_bam_path, "rb")
     reverse_bam_handler = pysam.AlignmentFile(reverse_bam_path, "rb")
-
-    #retrieve headers
-    forward_header = forward_bam_handler.header
-    reverse_header = reverse_bam_handler.header
-
-    # Create placeholder for chunks
 
     output_chunk_for = chunks_path / "chunk_for_%d.bam"
     output_chunk_rev = chunks_path / "chunk_rev_%d.bam"
 
-    nb_forward_block, nb_reverse_blocks = block_counter(forward_bam_path, reverse_bam_path)
+    chunk_index   = 0
+    current_count = 0
 
-    # Compute euclidean division to know chunks sizes
-    size_cut = np.divmod(nb_forward_block, (nb_chunks - 1))
-
-    # Create list of chunk sizes
-    cut_list = [size_cut[0]] * (nb_chunks - 1)
-    cut_list.append(size_cut[1])
-
-    # Instanciate index for list of chunks sizes
-    chunk_size_index = 0
-
-    # Instanciate generators to yield blocks of multi-mapping reads
-    for_iterator, rev_iterator = bam_iterator(forward_bam_path), bam_iterator(reverse_bam_path)
-
-    # Create empty lists to store blocks of reads
-    read_stack_for = []
-    read_stack_rev = []
-
-    # Set first output file
+    # Ouverture du premier chunk
     outfile_for = pysam.AlignmentFile(
-        str(output_chunk_for) % chunk_size_index, "wb", template = forward_bam_handler, header = forward_header
+        str(output_chunk_for) % chunk_index, "wb", template=forward_bam_handler
     )
     outfile_rev = pysam.AlignmentFile(
-        str(output_chunk_rev) % chunk_size_index, "wb", template = reverse_bam_handler, header = reverse_header
+        str(output_chunk_rev) % chunk_index, "wb", template=reverse_bam_handler
     )
 
-    # Parse alignment file to yield reads blocks
-    for block_for_, block_rev_ in zip(for_iterator, rev_iterator):
+    # ✅ Une seule passe, écriture immédiate, changement de chunk à la volée
+    for forward_block, reverse_block in zip(
+        bam_iterator(forward_bam_path), 
+        bam_iterator(reverse_bam_path)
+    ):
+        # Écriture immédiate
+        for read in forward_block:
+            outfile_for.write(read)
+        for read in reverse_block:
+            outfile_rev.write(read)
 
-        # Fill containers with blocks
-        if len(read_stack_for) < cut_list[chunk_size_index]:
+        current_count += len(forward_block)
 
-            read_stack_for.append(block_for_)
-            read_stack_rev.append(block_rev_)
-
-        # Write reads alignment in chunks once the container is full
-        elif len(read_stack_for) == cut_list[chunk_size_index]:
-
-            for block_for in read_stack_for:
-                for read_for in block_for:
-
-                    outfile_for.write(read_for)
-
-            for block_rev in read_stack_rev:
-                for read_rev in block_rev:
-
-                    outfile_rev.write(read_rev)
-            
-            # Close current chunk
+        # ✅ Changement de chunk quand la taille cible est atteinte
+        if current_count >= target_chunk_size and chunk_index < nb_chunks - 1:
             outfile_for.close()
             outfile_rev.close()
 
-            # Switch to next chunk
-            chunk_size_index += 1
+            chunk_index   += 1
+            current_count  = 0
 
-            # Free containers
-            read_stack_for = []
-            read_stack_rev = []
-
-            # Save current block
-            read_stack_for.append(block_for_)
-            read_stack_rev.append(block_rev_)
-
-            # Update output chunk file
             outfile_for = pysam.AlignmentFile(
-                str(output_chunk_for) % chunk_size_index, "wb", template = forward_bam_handler, header = forward_header
+                str(output_chunk_for) % chunk_index, "wb", template=forward_bam_handler
             )
             outfile_rev = pysam.AlignmentFile(
-                str(output_chunk_rev) % chunk_size_index, "wb", template = reverse_bam_handler, header = reverse_header
+                str(output_chunk_rev) % chunk_index, "wb", template=reverse_bam_handler
             )
 
-    # Fill last chunk
-    for block_for in read_stack_for:
-        for read_for in block_for:
-
-            outfile_for.write(read_for)
-
-    for block_rev in read_stack_rev:
-        for read_rev in block_rev:
-
-            outfile_rev.write(read_rev)
-    
-    # Close last chunk
     outfile_for.close()
     outfile_rev.close()
 
     forward_bam_handler.close()
     reverse_bam_handler.close()
 
-    logger.info(f"Chunks saved in {output_dir / 'chunks'}")
-
+    logger.info(f"Chunks saved in {chunks_path}")
 
 def subsample_restriction_map(restriction_map : dict = None, rate : float = 1.0) -> dict[str, np.ndarray[int]]:
     """
@@ -1184,7 +1169,6 @@ def subsample_restriction_map(restriction_map : dict = None, rate : float = 1.0)
 
     return subsampled_restriction_map
 
-
 def max_consecutive_nans(vector : np.ndarray) -> int:
     """
     Return the maximum number of consecutive NaN values in a vector.
@@ -1218,7 +1202,7 @@ def mad_smoothing(vector : np.ndarray[int] = None, window_size : int | str = "au
     window_size : int or str, optional
         Size of the window to perform mean sliding average in. Window is center on current value as [current_value - window_size/2] U [current_value + window_size/2], by default "auto"
     nmads : int, optional
-        number of median absolute deviation tu use, by default 1
+        number of median absolute deviation to use, by default 1
 
     Returns
     -------
@@ -1242,10 +1226,12 @@ def mad_smoothing(vector : np.ndarray[int] = None, window_size : int | str = "au
         .apply(lambda x: np.nanmean(x))
         .to_numpy()
     )
-
+    
+    averaged_data[averaged_data < 0] = 0
+    
     return averaged_data
 
-
+# not used anymore
 def replace_consecutive_zeros_with_mean(vector : np.ndarray[float]) -> np.ndarray[float]:
     """
     Replace consecutive zeros in a vector with the mean of the flanking values.
@@ -1290,6 +1276,173 @@ def replace_consecutive_zeros_with_mean(vector : np.ndarray[float]) -> np.ndarra
     
     return vector
 
+def fitting_ps(x : np.ndarray[float], y : np.ndarray[float]) -> np.ndarray[float]:
+    """
+    Fit ps curves to have estimates notably of last points.
+
+    Parameters
+    ----------
+    x : np.ndarray[float]
+        Array of x (genomic distances log binned)
+    y : np.ndarray[float]
+        Array containing the number of events in function of x       
+
+    Returns
+    -------
+    np.ndarray[float]
+        Array with corrected values based on a fit procedure. 
+    """   
+    # Initialize variables
+    y_original = y.copy()
+    x_original = x.copy()
+    # ========================================
+    # 1. FILTRAGE DES DONNÉES POUR LE FIT
+    # ========================================
+    mask_fit = (x > 1000) & (y>0) # on ne fitte que x > 1000
+    mask_unfitted = ~mask_fit  # points non-fittés
+    
+    x_fit = x[mask_fit]
+    y_fit = y[mask_fit]
+    
+    if len(y_fit) >= 2:   # we start fit only with a minimum number of points 
+        # ========================================
+        # 2. FIT LOWESS INITIAL (en log-log)
+        # ========================================
+        frac = 0.40
+        yhat_log = sm.nonparametric.lowess(
+            np.log10(y_fit),
+            np.log10(x_fit),
+            frac=frac,
+            return_sorted=False
+        )
+        residuals = np.log10(y_fit) - yhat_log
+        
+        # ========================================
+        # 3. DÉTECTION LOCALE DES OUTLIERS
+        # ========================================
+        window = 30
+        k = 1.5
+        
+        z = np.zeros_like(residuals)
+        for i in range(len(residuals)):
+            i0 = max(0, i - window // 2)
+            i1 = min(len(residuals), i + window // 2)
+            local_std = np.std(residuals[i0:i1])
+            local_mean = np.mean(residuals[i0:i1])
+            z[i] = (residuals[i] - local_mean) / (local_std + 1e-12)
+        
+        mask_good = np.abs(z) < k
+        
+        # ========================================
+        # 4. TEST SUR LES CHUTES FINALES
+        # ========================================
+        y_lowess_lin = 10 ** yhat_log
+        n_tail = min(5, len(x_fit))
+        
+        for i in range(1, n_tail + 1):
+            idx = -i
+            if idx < 0:
+                rel_dev = (y_fit[idx] - y_lowess_lin[idx]) / y_lowess_lin[idx]
+                if rel_dev < -0.6:
+                    mask_good[idx] = False
+        
+        # ========================================
+        # 5. REFIT LOWESS SANS OUTLIERS
+        # ========================================
+        yhat_clean = sm.nonparametric.lowess(
+            np.log10(y_fit[mask_good]),
+            np.log10(x_fit[mask_good]),
+            frac=frac,
+            return_sorted=True
+        )
+        x_clean = 10 ** yhat_clean[:, 0]
+        y_clean = 10 ** yhat_clean[:, 1]
+        
+    
+        # ========================================
+        # 6. CRÉATION DES VECTEURS CORRIGÉS (VERSION ROBUSTE)
+        # ========================================
+        print(f"\n📊 Interpolation :")
+        print(f"   Nombre de points x_clean : {len(x_clean)}")
+        
+        # Vérifier les doublons ou points mal formés
+        if len(x_clean) != len(np.unique(x_clean)):
+            print("   ⚠️ Doublons détectés dans x_clean !")
+            unique_idx = np.unique(x_clean, return_index=True)[1]
+            x_clean = x_clean[unique_idx]
+            y_clean = y_clean[unique_idx]
+            print(f"   → Nettoyé : {len(x_clean)} points uniques")
+        
+        # Choisir le type d'interpolation selon le nombre de points
+        if len(x_clean) < 4:
+            kind = 'linear'
+            print(f"   Mode : LINEAR (trop peu de points)")
+        elif len(x_clean) < 10:
+            kind = 'linear'
+            print(f"   Mode : LINEAR (sécurité)")
+        else:
+            kind = 'cubic'
+            print(f"   Mode : CUBIC")
+        
+        try:
+            f_interp = interp1d(
+                x_clean, y_clean,
+                kind=kind,
+                bounds_error=False,
+                fill_value='extrapolate'
+            )
+        except Exception as e:
+            print(f"   ⚠️ Erreur interpolation {kind} : {e}")
+            print(f"   Fallback sur LINEAR...")
+            f_interp = interp1d(
+                x_clean, y_clean,
+                kind='linear',
+                bounds_error=False,
+                fill_value='extrapolate'
+            )
+    
+        # Évaluer la prédiction LOWESS sur tous les x
+        y_pred_all = f_interp(x)
+        
+        # Évaluer seulement sur les x fittés
+        y_fit_pred_full = f_interp(x_fit)
+        
+        # SI l'extrapolation donne des valeurs bizarres en fin,
+        # on la remplace par la pente linéaire en fin de courbe
+        x_clean_max = x_clean[-1]
+        mask_beyond = x_fit > x_clean_max
+        
+        if np.any(mask_beyond):
+            n_ref_local = 5
+            slope_end = np.polyfit(np.log10(x_clean[-n_ref_local:]), 
+                                   np.log10(y_clean[-n_ref_local:]), 1)[0]
+            intercept_end = np.log10(y_clean[-1]) - slope_end * np.log10(x_clean[-1])
+            y_fit_pred_full[mask_beyond] = 10 ** (slope_end * np.log10(x_fit[mask_beyond]) + intercept_end)
+            
+            # Aussi pour y_pred_all au-delà
+            mask_beyond_all = x > x_clean_max
+            y_pred_all[mask_beyond_all] = 10 ** (slope_end * np.log10(x[mask_beyond_all]) + intercept_end)
+        
+        # ========================================
+        # 7. VECTEURS FINAUX
+        # ========================================
+        # Corriger les points fittés
+        y_fit_corrected = np.where(mask_good, y_fit, y_fit_pred_full)
+        
+        # VECTEUR FINAL : points non-fittés (intacts) + points fittés corrigés
+        y_final = np.concatenate([y_original[mask_unfitted], y_fit_corrected])
+        x_final = np.concatenate([x_original[mask_unfitted], x_fit])
+        
+        # Trier par x pour que ce soit cohérent
+        sort_idx = np.argsort(x_final)
+        x_final = x_final[sort_idx]
+        y_final = y_final[sort_idx]
+    
+    else :
+        y_final= y_original
+    
+    
+    return y_final
 
 def get_chunks(output_dir : str = None) -> tuple([List[str], List[str]]):
     """
@@ -1299,7 +1452,6 @@ def get_chunks(output_dir : str = None) -> tuple([List[str], List[str]]):
     ----------
     output_dir : str, optional
         Path to get chunks from, by default None
-
 
     Returns
     -------
@@ -1396,10 +1548,9 @@ def format_blacklist(blacklist : str = None) -> dict[str, Tuple[int, int]]:
                     result[chrom] = (int(start), int(end))
         return result
 
-
 def is_blacklisted(read_forward : pysam.AlignedSegment, read_reverse : pysam.AlignedSegment, blacklist : dict[str, Tuple[int, int]] = None) -> bool:
     """
-    Check if a read pair is blacklisted based on a list of coordiantes.
+    Check if a read pair is blacklisted based on a list of coordinates.
 
     Parameters
     ----------
@@ -1430,3 +1581,69 @@ def is_blacklisted(read_forward : pysam.AlignedSegment, read_reverse : pysam.Ali
     reverse_check = [low < reverse_start < high and read_reverse.reference_name == chrom.split("_")[0] for chrom, (low, high) in blacklist.items()]
 
     return any([f_check or r_check for f_check, r_check in zip(forward_check, reverse_check)])
+
+
+# Benchamrk analysis functions :
+
+def pearson_score(original_matrix : cooler.Cooler, rescued_matrix : cooler.Cooler , markers : list[int]) -> float:
+    """
+    Compute Pearson correlation between concatenated matrix bins which have been deleted and reconstructed.
+    
+    Parameters
+    ----------
+    original_matrix : cooler.Cooler
+        Cooler object containing the original matrix.
+    rescued_matrix : cooler.Cooler
+        Cooler object containing the reconstructed matrix.
+    markers : list[int]
+        List of markers to consider. Markers are the bins which have been deleted.
+
+    Returns
+    -------
+    float
+        Pearson correlation between original and reconstructed matrix.
+    """    
+    ori_matrix = original_matrix.matrix(balance=False)[:]
+    reco_matrix = rescued_matrix.matrix(balance=False)[:]
+
+    ori_vector = ori_matrix[markers]
+    reco_vector = reco_matrix[markers]
+
+    pearson_score = pearsonr(ori_vector.flatten(), reco_vector.flatten())
+
+    return pearson_score[0]
+
+def get_top_pattern(file : str = None, top : int = 10, chromosome : str = None) -> pd.DataFrame:
+    """
+    Get top patterns from a dataframe
+
+    Parameters
+    ----------
+    df : pd.DataFrame, optional
+        Dataframe containing patterns given by Chromosight, by default None
+    top : int, optional
+        Percentage of top patterns to get, by default 10
+    chromosome : str, optional
+        Chromosome to consider, by default None
+
+    Returns
+    -------
+    pd.DataFrame
+        Dataframe containing top percentage patterns.
+    """
+    df = pd.read_csv(file, sep = "\t", header = 0)
+    top_factor = (df.shape[0] * top) // 100
+
+    if chromosome is not None:
+        df = df.query(f"chrom1 == '{chromosome}' and chrom2 == '{chromosome}'")
+    df_top = df.sort_values(by='score', ascending=False).head(top_factor).reset_index(drop=True)
+
+    return df_top
+
+
+
+
+
+
+
+

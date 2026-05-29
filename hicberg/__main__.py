@@ -20,11 +20,11 @@ from hicberg.version import __version__
 CONTEXT_SETTINGS = {"help_option_names" :  ['-h', '--help'],
                     "max_content_width" : 120}
 
-epilogs = {"general" : "For more information about hicberg, please visit :https://github.com/sebgra/hicberg", 
+epilogs = {"general" : "For more information about hicberg, please visit :https://github.com/koszullab/hicberg", 
         "bowtie2" : "For more information about Bowtie2, please visit : http://bowtie-bio.sourceforge.net/bowtie2/index.shtml",
         "samtools" : "For more information about Samtools, please visit : http://www.htslib.org/doc/samtools.html",
         "cooler" : "For more information about cooler, please visit : https://cooler.readthedocs.io/en/latest/",
-        "complete" : "For more information about hicberg and used components, please visit :\nhttps://github.com/sebgra/hicberg\n - Bowtie2 : http://bowtie-bio.sourceforge.net/bowtie2/index.shtml\n - Samtools : http://www.htslib.org/doc/samtools.html"}
+        "complete" : "For more information about hicberg and used components, please visit :\nhttps://github.com/koszullab/hicberg\n - Bowtie2 : http://bowtie-bio.sourceforge.net/bowtie2/index.shtml\n - Samtools : http://www.htslib.org/doc/samtools.html"}
 
 class PythonLiteralOption(click.Option):
     def type_cast_value(self, ctx, value):
@@ -33,93 +33,98 @@ class PythonLiteralOption(click.Option):
         except:
             raise click.BadParameter(value)
         
-
 @click.group(context_settings = CONTEXT_SETTINGS, epilog = epilogs["complete"], options_metavar = "<options>")
 @click.version_option(version=__version__)
+
 def cli(chain=True):
     """
-    HiC-BERG: Rescuing of multi-reads in Hi-C maps.
+    Hicberg: Rescuing of multi-mapping reads in Hi-C/MicroC data.
     """
     ...
-
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["complete"], options_metavar = "<options>", )
 @click.argument('data', nargs = -1, metavar = "<genome> <input1> <input2>")
 @click.option("--index", "-i", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Index of the genome.")
-@click.option("--name", "-n", required = False, default = "sample", type = str, show_default = True, metavar = "<str>",  help = "Name of the analysis.")
+@click.option("--name", "-n", required = False, default = "sample", type = str, show_default = True, metavar = "<str>",  help = "Name of the analysis and repository.")
 @click.option("--rate", "-r", required = False, default = 1.0, type = float, show_default = True, metavar = "<float>", help = "Rate to use for sub-sampling restriction map.")
 @click.option("--distance", "-D", required = False, default = 1000, type = int, show_default = True, metavar = "<int>", help = "Maximum distance beyond which pairs are discarded in omics mode.")
 @click.option("--cpus", "-t", required = False, default = 1, type = int, show_default = True, metavar = "<int>", help = "Threads to use for analysis.")
 @click.option("--kernel-size", "-K", required = False, default = 11, type = int, show_default = True, metavar = "<int>", help = "Size of the gaussian kernel for contact density estimation.")
 @click.option("--deviation", "-d", required = False, default = 0.5, type = float, show_default = True, metavar = "<float>", help = "Standard deviation for contact density estimation.")
-@click.option("--mode", "-m", required = False, default = "full", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment.")
-@click.option("--max-alignment", '-k', required = False, type = int, default = None, metavar = "<int>", help = "Set the number of alignments to report in ambiguous reads case. Value of -1 reports all alignments.")
-@click.option("--sensitivity", "-s", required = False, type = click.Choice(["very-sensitive", "sensitive", "fast", "very-fast"]), default = "very-sensitive", show_default = True, metavar = "<str>", help = "Set sensitivity level for Bowtie2.")
-@click.option("--bins", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Genomic resolution.")
-@click.option("--enzyme", "-e", required = False, type = str, multiple = True, show_default = True, metavar = "<str>", help = "Enzymes to use for genome digestion.")
-@click.option("--circular", "-c", required = False, type = str, default = "", show_default = True, metavar = "<str>", help = "Name of the chromosome to consider as circular.")
-@click.option("--mapq", "-q", required = False, type = int, default = 35, show_default = True, metavar = "<int>", help = "Minimum mapping quality to consider a read as valid.")
-@click.option("--output", "-o", required = False, default = None, type = str, metavar = "<str>", help = "Output folder to save results.")
-@click.option("--start-stage", required = False, type = click.Choice(["fastq", "bam", "groups", "build", "stats", "rescue", "final"]), default = "fastq", show_default = True, metavar = "<str>", help = "Stage to start the pipeline.")
+@click.option("--mode", "-m", required = False, default = "standard", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment.")
+@click.option("--max_alignment", '-k', required = False, type = int, default = None, metavar = "<int>", help = "Set the number of alignments to report in ambiguous reads case. Value of -1 reports all alignments.")
+@click.option("--sensitivity", "-s", required = False, type = click.Choice(["very-sensitive-local", "sensitive", "fast", "very-fast"]), default = "very-sensitive-local", show_default = True, metavar = "<str>", help = "Set sensitivity level for Bowtie2.")
+@click.option("--trim5", '-5', required = False, type = int, default = None, metavar = "<int>", help = "Trim <int> bases from 5' (left) end of each read before alignment (default: 0)")
+@click.option("--bin_size", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Bin size")
+@click.option("--enzyme", "-e",   required = False, type = str, show_default = True, metavar = "<str>", help = "Enzymes to use for genome digestion.")
+@click.option("--circular", "-c", required = False, type = str, show_default = True, metavar = "<str>", help = "Name of the chromosomes to consider as circular.")
+@click.option("--mapq", "-q", required = False, type = int, default = 30, show_default = True, metavar = "<int>", help = "Minimum mapping quality to consider a read as valid.")
+@click.option("--output", "-o", required = False, default = ".", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. By default, working directory.")
+@click.option("--start-stage", required = False, type = click.Choice(["fastq", "bam", "groups", "build", "stats", "rescue", "final"]), default = "fastq", show_default = True, metavar = "<str>", help = "Stage to start the pipeline (fastq, bam, groups, build, stats, rescue, final).")
 @click.option("--exit-stage", required = False, type = click.Choice(["None", "bam", "groups", "build", "stats", "rescue", "final"]), default = "None", show_default = True, metavar = "<str>", help = "Stage to exit the pipeline.")
 @click.option("--force", "-f", is_flag = True, show_default = True, help = "Set if previous analysis files are deleted.")
-@click.option("--blacklist", "-B", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Blacklisted coordintaes to exclude reads for statistical learning. Provide either a bed file or a list of coordinates coma separated using UCSC format.")
-def pipeline_cmd(data, index, name, rate, distance, mode, kernel_size, deviation, cpus, output, max_alignment, sensitivity, bins, enzyme, circular, mapq, start_stage, exit_stage, force, blacklist):
+@click.option("--blacklist", "-B", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Blacklisted coordinates to exclude reads for statistical learning. Provide either a bed file or a list of coordinates coma separated using UCSC format.")
+
+def pipeline_cmd(data, index, name, rate, distance, mode, kernel_size, deviation, cpus, output, max_alignment, trim5, sensitivity, bin_size, enzyme, circular, mapq, start_stage, exit_stage, force, blacklist):
     """
-    Hi-C pipeline to generate enhanced contact matrix from fastq files.
+    Hi-C pipeline to generate contact maps including reads from repeated elements from fastq files.
     """
-    hpp.pipeline(genome = data[0], index = index, name = name, fq_for = data[1], fq_rev = data[2], output_dir = output, cpus = cpus, rate = rate, distance = distance, nb_chunks = 2 * cpus, mode = mode, kernel_size = kernel_size, deviation = deviation, max_alignment = max_alignment,  sensitivity = sensitivity, bins = bins, enzyme = enzyme, circular = circular, mapq = mapq, start_stage = start_stage, exit_stage = exit_stage, force = force, blacklist = blacklist)
+    hpp.pipeline(genome = data[0], index = index, name = name, fq_for = data[1], fq_rev = data[2], output_dir = output, cpus = cpus, rate = rate, distance = distance, nb_chunks = 2 * cpus, mode = mode, kernel_size = kernel_size, deviation = deviation, max_alignment = max_alignment,  sensitivity = sensitivity, trim5 = trim5, bin_size = bin_size, enzyme = enzyme, circular = circular, mapq = mapq, start_stage = start_stage, exit_stage = exit_stage, force = force, blacklist = blacklist)
     return
 
-
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
+@click.option("--output", "-o", required = False, default = ".", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
 @click.option("--name", "-n", required = False, default = None, type = str, show_default = True, metavar = "<str>",  help = "Name of the output folder to create. If not set, 'sample' is used.")
 @click.option("--force", "-f", is_flag = True, help = "Set if previous analysis files are deleted.")
-def create_folder_cmd(output, force, name):
+
+def create_folder_cmd(output_dir, force, name):
     """
     Create a folder to save results. Folder will be set as <output>/<name>.
     """
-    hio.create_folder(sample_name=name, output_dir=output, force=force)
+    hio.create_folder(sample_name=name, output_dir=output_dir, force=force)
     return
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
-@click.option("--bins", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Genomic resolution.")
-def get_tables_cmd(data, bins, output):
+@click.option("--output", "-o", required = False, default = ".", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
+@click.option("--bin_size", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Genomic resolution.")
+
+def get_tables_cmd(data, bin_size, output):
     """
     Create tables for the genome length detail and the bins.
     """
     hut.get_chromosomes_sizes(genome = data[0], output_dir = output)
-    hut.get_bin_table(bins = bins, output_dir = output)
+    hut.get_bin_table(bin_size = bin_size, output_dir = output)
     return
 
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["bowtie2"] + "\n"  + epilogs["samtools"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome> <input1> <input2>")
 @click.option("--index", "-i", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Index of the genome (path). If not set, the index is built.")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
-@click.option("--sensitivity", "-s", required = False, type = click.Choice(["very-sensitive", "sensitive", "fast", "very-fast"]), default = "very-sensitive", show_default = True, metavar = "<str>", help = "Set sensitivity level for Bowtie2.")
-@click.option("--max-alignment", '-k', required = False, type = int, default = None, show_default = True, metavar = "<int>", help = "Set the number of alignments to report in ambiguous reads case. If set to -1, all alignments are reported.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results. If not set, the current directory is used.")
+@click.option("--sensitivity", "-s", required = False, type = click.Choice(["very-sensitive-local", "sensitive", "fast", "very-fast"]), default = "very-sensitive-local", show_default = True, metavar = "<str>", help = "Set sensitivity level for Bowtie2.")
+@click.option("--max_alignment", '-k', required = False, type = int, default = None, show_default = True, metavar = "<int>", help = "Set the number of alignments to report in ambiguous reads case. If set to -1, all alignments are reported.")
+@click.option("--trim5", '-5', required = False, type = int, default = None, metavar = "<int>", help = "Trim <int> bases from 5' (left) end of each read before alignment (default: 0)")
 @click.option("--cpus", "-t", required = False, default = 1, type = int, show_default = True, metavar = "<int>", help = "Threads to use for analysis.")
 @click.option("--verbose", "-v", is_flag = True, help = "Set verbosity level.")
-def alignment_cmd(data, index, max_alignment, sensitivity, output, cpus, verbose):
+
+def alignment_cmd(data, index, max_alignment, trim5, sensitivity, output, cpus, verbose):
     """
     Perform alignment of Hi-C reads.
     """
     if index is None:
         index = hal.hic_build_index(genome = data[0], output_dir = output, cpus = cpus, verbose = verbose)
 
-    hal.hic_align(index = index, fq_for = data[1], fq_rev = data[2], sensitivity = sensitivity, max_alignment = max_alignment, output_dir = output, cpus = cpus, verbose = True)
+    hal.hic_align(index = index, fq_for = data[1], fq_rev = data[2], sensitivity = sensitivity, max_alignment = max_alignment, trim5 = trim5, output_dir = output, cpus = cpus, verbose = True)
     hal.hic_view(output_dir = output, cpus = cpus, verbose = verbose)
     hal.hic_sort(output_dir = output, cpus = cpus, verbose = verbose)
     return
 
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
-@click.option("--mapq", "-q", required = False, type = int, default = 35, help = "Minimum mapping quality to consider a read as non ambiguous.")
-@click.option("--output", "-o", required = False, default = None, type = str, help = "Output folder to save results.")
+@click.option("--mapq", "-q", required = False, type = int, default = 30, help = "Minimum mapping quality to consider a read as non ambiguous.")
+@click.option("--output", "-o", required = False, default = ".", type = str, help = "Output folder to save results.")
+
 def classify_cmd(mapq, output):
     """
     Perform classification of Hi-C reads (pairs).
@@ -133,8 +138,9 @@ def classify_cmd(mapq, output):
 
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
 @click.option("--recover", "-r", required = False, default = False, is_flag = True, help = "Set if pairs are built after reads reassignment. Therefore alignment files of group2 will be used.")
+
 def build_pairs_cmd(output, recover):
     """
     Create pair files from a pair of alignment files.
@@ -144,30 +150,32 @@ def build_pairs_cmd(output, recover):
 
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["cooler"], options_metavar = "<options>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
 @click.option("--recover", "-r", required = False, default = False, is_flag = True, help = "Set if .cool matrix are built after reads reassignment. Therefor pairs file from group2 will be used.")
 @click.option("--cpus", "-t", required = False, default = 1, type = int, help = "Threads to use for matrix building.")
-def build_matrix_cmd(output, recover, cpus):
+
+def build_matrix_cmd(pairs, output, recover, cpus):
     """
     Create matrix (.cool) from pairs files.
     """
-    hio.build_matrix(cpus = cpus, output_dir = output, mode = recover)
+    hio.build_matrix(pairs = pairs, cpus = cpus, output_dir = output, mode = recover)
 
     return
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
 @click.option("--mode", "-m", required = False, default = "standard", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment.")
 @click.option("--kernel-size", "-K", required = False, default = 11, type = int, show_default = True, metavar = "<int>", help = "Size of the gaussian kernel for contact density estimation.")
 @click.option("--deviation", "-d", required = False, default = 0.5, type = float, show_default = True, metavar = "<float>", help = "Standard deviation for contact density estimation.")
 @click.option("--rate", "-r", required = False, default = 1.0, type = float, show_default = True, metavar = "<float>", help = "Rate to use for sub-sampling restriction map.")
 @click.option("--enzyme", "-e", required = False, type = str, multiple = True, show_default = True, metavar = "<str>", help = "Enzymes to use for genome digestion.")
 @click.option("--circular", "-c", required = False, type = str, default = "", show_default = True, metavar = "<str>", help = "Name of the chromosome to consider as circular.")
-@click.option("--bins", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Genomic resolution.")
+@click.option("--bin_size", "-b", required = False, type = int, default = 2000, show_default = True, metavar = "<int>", help = "Genomic resolution.")
 @click.option("--cpus", "-t", required = False, default = 1, type = int, show_default = True, metavar = "<int>", help = "Threads to use for analysis.")
 @click.option("--blacklist", "-B", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Blacklisted coordintaes to exclude reads for statistical learning. Provide either a bed file or a list of coordinates coma separated using UCSC format.")
-def statistics_cmd(data, mode, kernel_size, deviation,  rate, enzyme, circular, bins, output, cpus, blacklist):
+
+def statistics_cmd(data, mode, kernel_size, deviation,  rate, enzyme, circular, bin_size, output, cpus, blacklist):
     """
     Extract statistics from non ambiguous Hi-C data.
     """
@@ -182,9 +190,9 @@ def statistics_cmd(data, mode, kernel_size, deviation,  rate, enzyme, circular, 
     hst.get_dist_frags(genome = data[0], restriction_map = restriction_map, circular = circular, rate = rate, output_dir = output)
     hst.log_bin_genome(genome = data[0], output_dir = output)
 
-    p1 = Process(target = hst.get_patterns(circular = circular, blacklist = blacklist, output_dir = output))
+    p1 = Process(target = hst.generate_intra_ps(circular = circular, blacklist = blacklist, output_dir = output))
     p2 = Process(target = hst.generate_trans_ps(output_dir = output))
-    p3 = Process(target = hst.generate_coverages(genome = data[0], bins = bins, output_dir = output))
+    p3 = Process(target = hst.generate_coverages(genome = data[0], bin_size = bin_size, output_dir = output))
     p4 = Process(target = hst.generate_d1d2(output_dir = output))
 
     # Launch processes
@@ -193,17 +201,17 @@ def statistics_cmd(data, mode, kernel_size, deviation,  rate, enzyme, circular, 
         process.join()
 
     if mode in ["full", "density"]:
-
-            hst.compute_density(kernel_size = kernel_size, deviation = deviation, threads  = cpus, output_dir  = output)
+            hst.generate_density_map2(kernel_size = kernel_size, deviation = deviation, threads  = cpus, output_dir  = output)
     return
         
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
-@click.option("--enzyme", "-e", required = False, type = str, multiple = True, show_default = True, metavar = "<str>", help = "Enzymes to use for genome digestion.")
-@click.option("--mode", "-m", required = False, default = "full", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--enzyme", "-e", required = False, type = str, show_default = True, metavar = "<str>", help = "Enzymes to use for genome digestion.")
+@click.option("--mode", "-m", required = False, default = "standard", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment.")
 @click.option("--cpus", "-t", required = False, default = 1, type = int, show_default = True, metavar = "<int>", help = "Threads to use for analysis.")
+
 def rescue_cmd(data, enzyme, mode, output, cpus):
     """
     Reallocate ambiguous reads to the most plausible position according to model.
@@ -217,7 +225,6 @@ def rescue_cmd(data, enzyme, mode, output, cpus):
 
     # Reattribute reads
     with multiprocessing.Pool(processes = cpus) as pool: # cpus
-
         results = pool.map(partial(hst.reattribute_reads, mode = mode, restriction_map = restriction_map, output_dir = output),
         zip(forward_chunks, reverse_chunks))
         pool.close()
@@ -229,15 +236,16 @@ def rescue_cmd(data, enzyme, mode, output, cpus):
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
-@click.option("--bins", "-b", required = False, default = 2000, type = int, show_default = True, metavar = "<int>", help = "Genomic resolution.")
-def plot_cmd(data, bins, output):
+@click.option("--output", "-o", required = False, default = ".", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--bin_size", "-b", required = False, default = 2000, type = int, show_default = True, metavar = "<int>", help = "Genomic resolution.")
+
+def plot_cmd(data, bin_size, output):
     """
     Plot results from analysis.
     """
     p1 = Process(target = hpl.plot_laws(output_dir = output))
     p2 = Process(target = hpl.plot_trans_ps(output_dir = output))
-    p3 = Process(target = hpl.plot_coverages(bins = bins, output_dir = output))
+    p3 = Process(target = hpl.plot_coverages(bin_size = bin_size, output_dir = output))
     p4 = Process(target = hpl.plot_couple_repartition(output_dir = output))
     p5 = Process(target = hpl.plot_matrix(genome = data[0], output_dir = output))
     p6 = Process(target = hpl.plot_d1d2(output_dir = output))
@@ -251,7 +259,8 @@ def plot_cmd(data, bins, output):
     return
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+
 def tidy_cmd(output):
     """
     Tidy output folder.
@@ -263,7 +272,8 @@ def tidy_cmd(output):
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<input1> <input2>")
 @click.option("--chunks", "-n", required = False, default = 2, type = int, show_default = True, metavar = "<int>", help = "Number of chunks to generate.")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save the chunks.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save the chunks.")
+
 def chunk_cmd(data, chunks, output):
     """
     Chunk provided inputs in a desired number of pieces.
@@ -274,7 +284,7 @@ def chunk_cmd(data, chunks, output):
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
 @click.argument('data', nargs = -1, metavar = "<genome>")
-@click.option("--output", "-o", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
+@click.option("--output", "-o", required = False, default = "", type = str, show_default = True, metavar = "<str>", help = "Output folder to save results.")
 @click.option("--chromosome", "-c", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Chromosome to get as source for duplication.")
 @click.option("--position", "-p", required = False, default = None, type = int, show_default = True, metavar = "<int>", help = "Position to get as source for duplication.")
 @click.option("--trans-chromosome", "-C", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Chromosome to get as target for duplication.")
@@ -284,7 +294,7 @@ def chunk_cmd(data, chunks, output):
 @click.option("--auto", "-a", required = False, default = None, type = int, show_default = True, metavar = "<int>", help = "Automatically select auto intervals for duplication.")
 @click.option("--kernel-size", "-K", required = False, default = 11, type = int, show_default = True, metavar = "<int>", help = "Size of the gaussian kernel for contact density estimation.")
 @click.option("--deviation", "-d", required = False, default = 0.5, type = float, show_default = True, metavar = "<float>", help = "Standard deviation for contact density estimation.")
-@click.option("--mode", "-m", required = False, default = "full", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment. Multiple modes must be coma separated.")
+@click.option("--mode", "-m", required = False, default = "standard", type = str, show_default = True, metavar = "<str>", help = "Statistical model to use for ambiguous reads assignment. Multiple modes must be coma separated.")
 @click.option("--pattern", "-S", required = False, type = click.Choice(["loops", "borders", "hairpins", "-1"]), default = None, show_default = True, metavar = "<str>", help = "Set pattern if benchmarking considering patterns.")
 @click.option("--threshold", "-t", required = False, type = float, default = 0.0, show_default = True, metavar = "<float>", help = "Set pattern score threshold under which pattern are discarded.")
 @click.option("--jitter", "-j", required = False, type = int, default = 0, show_default = True, metavar = "<int>", help = "Set jitter for pattern detection interval overlapping")
@@ -293,6 +303,7 @@ def chunk_cmd(data, chunks, output):
 @click.option("--iterations", "-i", required = False, type = int, default = 3, show_default = True, metavar = "<int>", help = "Set the number of iterations for benchmarking.")
 @click.option("--force", "-f", is_flag = True, help = "Set if previous analysis files have to be deleted.")
 @click.option("--cpus", required = False, default = 1, type = int, show_default = True, metavar = "<int>", help = "Threads to use for analysis.")
+
 def benchmark_cmd(data, chromosome, position, trans_chromosome, trans_position, bins, strides, auto, kernel_size, deviation, mode, pattern, threshold, jitter, trend, top, iterations, force, output, cpus):
     """
     Perform benchmarking of the statistical model (this can be time consuming).

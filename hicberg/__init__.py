@@ -8,7 +8,12 @@ logger.setLevel(logging.INFO)
 
 # Create handlers
 console_handler = logging.StreamHandler()
-file_handler = logging.FileHandler(f'hicberg_{time.strftime("%Y_%m_%d_%H_%M_%S")}.log')
+log_filename = f'hicberg_{time.strftime("%Y_%m_%d_%H_%M_%S")}.log'
+file_handler = logging.FileHandler(log_filename)
+
+with open('name_of_log.txt', 'w') as f:
+    f.write(log_filename)
+
 console_handler.setLevel(logging.INFO)
 file_handler.setLevel(logging.INFO)
 
