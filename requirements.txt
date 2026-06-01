@@ -1,6 +1,6 @@
 bioframe
 biopython
-# bowtie2
+bowtie2
 click
 cooler
 funcy
@@ -9,8 +9,7 @@ matplotlib
 numpy
 pandas
 pysam
-# pybedtools
-# samtools
+samtools
 scipy
 scikit-learn
 statsmodels
