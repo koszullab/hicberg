@@ -167,11 +167,11 @@ def pipeline(
         for process in [p1, p2, p3]:
             process.join()
         
-        if mode in ["d1d2", "full"]:   
-            hst.generate_density_map2(cooler_file = UNRESCUED_MATRIX, threads  = cpus, output_dir  = output_folder)
+        if mode in ["d1d2"]:   
+            hst.generate_d1d2, kwargs = dict(output_dir = output_folder)
             
         if mode in ["density", "full"]:
-            hst.generate_d1d2, kwargs = dict(output_dir = output_folder)
+            hst.generate_density_map2(cooler_file = UNRESCUED_MATRIX, threads  = cpus, output_dir  = output_folder)
                      
     if exit_stage_n  == 4:
         logger.info(f"Ending Hicberg pipeline at {exit_stage}")
@@ -232,7 +232,7 @@ def pipeline(
         for process in [p1, p2, p3, p4, p5]:
             process.join()
 
-        if mode in ["d1d2", "full"]:   
+        if mode in ["d1d2"]:   
             hpl.plot_d1d2, kwargs = dict(output_dir = output_folder)
             
         if mode in ["density", "full"]:
