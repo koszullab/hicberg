@@ -34,7 +34,7 @@ mamba install bioconda::bwa;
 mamba install bioconda::minimap2
 ```
 
-### Conda / Mamba
+#### Conda / Mamba
 
 We highly recommend installing Hicberg through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
 
@@ -58,7 +58,7 @@ mamba install bioconda::bwa;
 mamba install bioconda::minimap2
 ```
 
-## Usage
+### Usage
 
 `hicberg` requires a FASTA file containing the reference genome against which the reads will be aligned, as well as two paired-end FASTQ files generated from a Hi-C, MicroC, ChIP-seq, or Mnase experiment. You can always run:
 
@@ -85,7 +85,7 @@ When running `hicberg`, there are a handful parameters which are especially impo
 * `-o`: directory in which the output directory will be placed.
 * `-n`: name of the output folder that will contain the reconstructed data for a given experiment.   
 
-## <a id="contributing"></a> Contributing
+### <a id="contributing"></a> Contributing
 
 All contributions are welcome, in the form of bug reports, suggestions, documentation or pull requests. We use the Numpy standard for docstrings when documenting functions.
 
@@ -93,14 +93,13 @@ The code formatting standard we use is black, with --line-length=79 to follow PE
 
 ```bash
 coverage run --source=hicberg -m pytest -v tests --cov-report=xml
-
 ```
 
-## <a id="authors"></a> Authors
+### <a id="authors"></a> Authors
 
 - [@sebgra](https://www.github.com/sebgra)
 
-## <a id="citation"></a> Citation
+### <a id="citation"></a> Citation
 
 [https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
 
