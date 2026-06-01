@@ -43,4 +43,5 @@ jobs:
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v5
       env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
