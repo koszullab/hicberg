@@ -1,7 +1,7 @@
 
 # Hicberg
 
-<img src="docs/images/pitch_hicberg.png" width="1000"/>
+<img src="docs/images/pitch_hicberg2.png" width="1000"/>
 
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
 [![GPLv3 License](https://img.shields.io/badge/License-GPL%20v3-yellow.svg)](https://opensource.org/licenses/)
