@@ -15,23 +15,14 @@ Python package to reconstruct genomic signals from paired end data like Hi-C com
 
 We highly recommend installing Hicberg through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
 
+You can create an specific environment and activate it:
 ```bash
-mamba install -c bioconda hicberg
+mamba create -n hicberg -f environment.yml;
+mamba activate hicberg
 ```
 
 ```bash
-
-wget "https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-$(uname)-$(uname -m).sh"
-bash Mambaforge-$(uname)-$(uname -m).sh
-mamba create -n hicberg -f environment.yml;
-
-mamba activate hicberg
-
-mamba install bioconda::bowtie2
-mamba install bioconda::samtools
-mamba install bioconda::bedtools
-mamba install bioconda::ucsc-bedgraphtobigwig
-
+mamba install -c bioconda hicberg
 ```
 
 ### Usage
