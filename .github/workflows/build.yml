@@ -11,13 +11,14 @@ jobs:
     steps:
 
     - name: Checkout repo
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
     
     - name: Create micromamba env. for package
       uses: mamba-org/setup-micromamba@v2
       with:
         generate-run-shell: true
         environment-file: environment.yml
+        post-cleanup: none  # ← évite les erreurs de nettoyage
 
     - name: Install package
       run: |
