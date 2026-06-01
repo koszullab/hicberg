@@ -24,14 +24,6 @@ jobs:
         pip install .
       shell: micromamba-shell {0}
 
-    - name: Install additional packages
-      run: |
-        sudo apt install bowtie2
-        conda install bioconda::samtools
-        conda install bioconda::bedtools
-        conda install bioconda::ucsc-bedgraphtobigwig
-      shell: micromamba-shell {0}
-
     - name: Check installed package
       run: |
         hicberg --version
@@ -41,14 +33,13 @@ jobs:
     - name: Lint and test
       run: |
         pip install pytest-pylint pytest pytest-cov pylint codecov mappy
-        pytest --pylint --pylint-error-types=EF --pylint-rcfile=.pylintrc --doctest-modules --doctest-modules hicberg
+        pytest --pylint --pylint-error-types=EF --pylint-rcfile=.pylintrc --doctest-modules hicberg
         coverage run --source=hicberg -m pytest -v tests
         coverage report -m
-        coverage run --source=hicberg -m pytest -v tests --cov-report=xml
         coverage xml
       shell: micromamba-shell {0}
 
-    - name: Upload coverage reports to Codecov with GitHub Action
+    - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v5
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
