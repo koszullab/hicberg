@@ -13,50 +13,16 @@ Python package to reconstruct genomic signals from paired end data like Hi-C com
 
 ### Installation  
 
-Create environment by using following command :
-
-```bash
-mamba env create -n [ENV_NAME] -f hicberg.yaml;
-```
-
-To ensure that hicberg is correctly working, Bowtie2, Samtools, bedGraphToBigWig and BedTools have to be installed. These can be install through : 
-
-```bash
-mamba install bowtie2 -c bioconda;
-mamba install samtools -c bioconda;
-mamba install -c bioconda ucsc-bedgraphtobigwig;
-mamba install bedtools -c bioconda;
-```
-
-Depending on your aligner preferences, `BWA` and `Minimap2` might be installed through:
-
-```bash
-mamba install bioconda::bwa;
-mamba install bioconda::minimap2
-```
-
-#### Conda / Mamba
-
 We highly recommend installing Hicberg through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
+
+You can create an specific environment and activate it:
+```bash
+mamba create -n hicberg -f environment.yml;
+mamba activate hicberg
+```
 
 ```bash
 mamba install -c bioconda hicberg
-```
-
-```bash
-
-wget "https://github.com/conda-forge/miniforge/releases/latest/download/Mambaforge-$(uname)-$(uname -m).sh"
-bash Mambaforge-$(uname)-$(uname -m).sh
-mamba create -n hicberg python=3.11.4
-mamba activate hicberg
-mamba install bioconda::bowtie2
-mamba install bioconda::samtools
-mamba install bioconda::bedtools
-mamba install bioconda::ucsc-bedgraphtobigwig
-
-# For exhaustive aligners usage
-mamba install bioconda::bwa;
-mamba install bioconda::minimap2
 ```
 
 ### Usage
