@@ -10,7 +10,7 @@
 
 Python package to reconstruct genomic signals from paired end data like Hi-C coming from repeated elements
 
-### Environnement  
+### Installation  
 
 Create environment by using following command :
 
@@ -18,12 +18,9 @@ Create environment by using following command :
 mamba env create -n [ENV_NAME] -f hicberg.yaml;
 ```
 
-### Dependencies
-
 To ensure that hicberg is correctly working, Bowtie2, Samtools, bedGraphToBigWig and BedTools have to be installed. These can be install through : 
 
 ```bash
-
 mamba install bowtie2 -c bioconda;
 mamba install samtools -c bioconda;
 mamba install -c bioconda ucsc-bedgraphtobigwig;
@@ -37,10 +34,9 @@ mamba install bioconda::bwa;
 mamba install bioconda::minimap2
 ```
 
-
 ### Conda / Mamba
 
-We highly recommend installing HiC-BERG through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
+We highly recommend installing Hicberg through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
 
 ```bash
 mamba install -c bioconda hicberg
@@ -68,6 +64,14 @@ mamba install bioconda::minimap2
 hicberg pipeline -e DpnII,HinfI --cpus 8 -o /home/bob/ -n output_repo/ yeast_reference_genome.fa  reads_R1.fastq reads_R2.fastq 
 ```
 
+### Important options 
+
+When running hicberg, there are a handful parameters which are especially important:
+
+* `-k 100`: maximum number of alignments returned by Bowtie2 for a read (for organisms with repetitive elements with a  large number of occurrences, we recommend limiting the search space).
+* `-m standard`: mode for the computation of probabilites, (standard uses coverage and p(s), full uses coverage, p(s) and density laws). 
+* `--cpus 10`: number of cpu to allocate.
+* `-c plasmid2micron,chrMT`: circular chromosomes, molecule present in the genome (used in the computation of p(s) behavior). 
 
 ## <a id="contributing"></a> Contributing
 
@@ -86,6 +90,6 @@ coverage run --source=hicberg -m pytest -v tests --cov-report=xml
 
 ## <a id="citation"></a> Citation
 
-[!https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
+[https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
 
 
