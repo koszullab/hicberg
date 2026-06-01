@@ -3,8 +3,8 @@
 # Title : setup.py
 # Date : 25-03-2022
 # Time : 14:22
-# Author : Sébastien Gradit
-# Github : https://github.com/sebgra
+# Author : RSG lab
+# Github : https://github.com/koszullab/hicberg/
 ########################################################
 ########################################################
 
@@ -25,7 +25,7 @@ CLASSIFIERS = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.10",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Visualization",
@@ -59,7 +59,7 @@ with open("hicberg/version.py", "w") as f:
 
 setup(
     name=name,
-    author="sgradit",
+    author="rsg",
     author_email="sebastien.gradit@pasteur.fr",
     description=DESCRIPTION,
     long_description=LONG_DESCRIPTION,
@@ -68,7 +68,7 @@ setup(
     classifiers=CLASSIFIERS,
     url=URL,
     packages=find_packages(),
-    python_requires=">=3.11",
+    python_requires=">=3.10",
     include_package_data=True,
     install_requires=REQUIREMENTS,
     long_description_content_type="text/markdown",
