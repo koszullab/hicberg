@@ -68,6 +68,7 @@ hicberg pipeline -e DpnII,HinfI --cpus 8 -o /home/bob/ -n output_repo/ yeast_ref
 
 When running hicberg, there are a handful parameters which are especially important:
 
+* `-e DpnII,HinfI`: Restriction enzymes used in the Hi-C protocole (e.g DpnII, HinfI).
 * `-k 100`: maximum number of alignments returned by Bowtie2 for a read (for organisms with repetitive elements with a  large number of occurrences, we recommend limiting the search space).
 * `-m standard`: mode for the computation of probabilites, (standard uses coverage and p(s), full uses coverage, p(s) and density laws). 
 * `--cpus 10`: number of cpu to allocate.
