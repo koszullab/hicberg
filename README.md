@@ -58,6 +58,15 @@ mamba install bioconda::bwa;
 mamba install bioconda::minimap2
 ```
 
+## Usage
+
+`hicberg` requires a FASTA file containing the reference genome against which the reads will be aligned, as well as two paired-end FASTQ files generated from a Hi-C, MicroC, ChIP-seq, or Mnase experiment. You can always run:
+
+```bash
+hicberg --help
+```
+Differents modes can be used to compute the probabilities of alignments for the different possibilities of reads coming from repeated elements.
+
 ### Example
 
 ```bash
@@ -66,13 +75,15 @@ hicberg pipeline -e DpnII,HinfI --cpus 8 -o /home/bob/ -n output_repo/ yeast_ref
 
 ### Important options 
 
-When running hicberg, there are a handful parameters which are especially important:
+When running `hicberg`, there are a handful parameters which are especially important:
 
 * `-e DpnII,HinfI`: Restriction enzymes used in the Hi-C protocole (e.g DpnII, HinfI).
 * `-k 100`: maximum number of alignments returned by Bowtie2 for a read (for organisms with repetitive elements with a  large number of occurrences, we recommend limiting the search space).
 * `-m standard`: mode for the computation of probabilites, (standard uses coverage and p(s), full uses coverage, p(s) and density laws). 
 * `--cpus 10`: number of cpu to allocate.
-* `-c plasmid2micron,chrMT`: circular chromosomes, molecule present in the genome (used in the computation of p(s) behavior). 
+* `-c plasmid2micron,chrMT`: circular chromosomes, molecule present in the genome (used in the computation of p(s) behavior).
+* `-o`: directory in which the output directory will be placed.
+* `-n`: name of the output folder that will contain the reconstructed data for a given experiment.   
 
 ## <a id="contributing"></a> Contributing
 
