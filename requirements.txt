@@ -11,3 +11,4 @@ pysam
 scipy
 scikit-learn
 statsmodels
+statsmodels
