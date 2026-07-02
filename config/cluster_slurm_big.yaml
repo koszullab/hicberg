@@ -1,0 +1,85 @@
+# CPU ans memory settings
+
+__default__:
+    queue: fast
+    ncpus: 1
+    mem: 16G
+    ntasks: 1
+    partition : common,dedicated
+    name: hicberg.{rule}.{wildcards}
+    output: logs/cluster/{rule}.{wildcards}.out
+    error: logs/cluster/{rule}.{wildcards}.err
+
+hicberg_step_0:
+    queue: normal
+    partition: common
+    ncpus: 4
+    mem: 8G
+    ntasks: 1
+    name: hicberg.{rule}.{wildcards}
+    output: ../logs/cluster/preprocessing-'{wildcards.libraries}'.out
+    error: ../logs/cluster/preprocessing-'{wildcards.libraries}'.log
+
+hicberg_step_1:
+    queue: normal
+    partition: common
+    ncpus: 32
+    mem: 64G
+    ntasks: 1
+    name: aligning-'{wildcards.libraries}'
+    output: ../logs/cluster/aligning-'{wildcards.libraries}'.out
+    error: ../logs/cluster/aligning-'{wildcards.libraries}'.log
+
+hicberg_step_2:
+    queue: normal
+    partition: common
+    ncpus: 16
+    mem: 32G
+    ntasks: 1
+    name: grouping-'{wildcards.libraries}'
+    output: ../logs/cluster/grouping-'{wildcards.libraries}'.out
+    error: ../logs/cluster/grouping-'{wildcards.libraries}'.log
+
+hicberg_step_3:
+    queue: normal
+    partition: common
+    ncpus: 8
+    mem: 16G
+    ntasks: 1
+    name: building-'{wildcards.libraries}'
+    output: ../logs/cluster/building-'{wildcards.libraries}'.out
+    error: ../logs/cluster/building-'{wildcards.libraries}'.log
+
+hicberg_step_4:
+    queue: normal
+    partition: common
+    ncpus: 8
+    mem: 16G
+    ntasks: 1
+    name: profiling-'{wildcards.libraries}'
+    output: ../logs/cluster/profiling-'{wildcards.libraries}'.out
+    error: ../logs/cluster/profiling-'{wildcards.libraries}'.log
+
+hicberg_step_5:
+    queue: normal
+    partition: common
+    ncpus: 64
+    mem: 128G
+    ntasks: 1
+    name: rescuing-'{wildcards.libraries}'
+    output: ../logs/cluster/rescuing-'{wildcards.libraries}'.out
+    error: ../logs/cluster/rescuing-'{wildcards.libraries}'.log
+
+
+
+# Command to run everything
+
+# First it's necessary to build conda env as the cluster nodes are not connected
+# to the network.
+# snakemake --conda-create-envs-only --use-conda -j 1
+
+# Build the log directory.
+# mkdir -p logs/cluster/
+
+# Run everything on cluster.
+# snakemake --cluster "sbatch --mem {cluster.mem} -p {cluster.partition} --qos {cluster.queue} -c {cluster.ncpus} -n {cluster.ntasks} -J {cluster.name} -o {cluster.output} -e {cluster.error}" --cluster-config config/cluster_slurm.yaml -j 64 --use-conda

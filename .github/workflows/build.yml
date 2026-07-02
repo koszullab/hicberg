@@ -1,0 +1,50 @@
+name: build
+
+on: [push]
+
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # ← ajouter ça
+  
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 5
+
+    steps:
+
+    - name: Checkout repo
+      uses: actions/checkout@v4
+    
+    - name: Create micromamba env. for package
+      uses: mamba-org/setup-micromamba@v2
+      with:
+        generate-run-shell: true
+        environment-file: environment.yml
+        post-cleanup: none  # ← évite les erreurs de nettoyage
+
+    - name: Install package
+      run: |
+        pip install .
+      shell: micromamba-shell {0}
+
+    - name: Check installed package
+      run: |
+        hicberg --version
+        bowtie2 --version
+      shell: micromamba-shell {0}
+
+    - name: Lint and test
+      run: |
+        pip install pytest-pylint pytest pytest-cov pylint codecov mappy
+        pytest --pylint --pylint-error-types=EF --pylint-rcfile=.pylintrc --doctest-modules hicberg
+        coverage run --source=hicberg -m pytest -v tests
+        coverage report -m
+        coverage xml
+      shell: micromamba-shell {0}
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

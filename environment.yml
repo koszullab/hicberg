@@ -1,0 +1,17 @@
+name: hicberg
+channels:
+  - bioconda
+  - conda-forge
+  - pkgs/main
+dependencies:
+  - bioconda::bowtie2
+  - biopython
+  - cooler
+  - h5py
+  - hicstuff==3.2.4
+  - numpy=1.26.4
+  - pytest
+  - python=3.10
+  - bioconda::samtools
+  - bioconda::ucsc-bedgraphtobigwig   # only for omics mode
+  - bioconda::bedtools      # only for omics mode
