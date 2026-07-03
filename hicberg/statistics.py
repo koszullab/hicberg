@@ -1075,7 +1075,7 @@ def _make_propensity_calculator(
                 ps = get_trans_ps(fwd, rev, trans_ps)
             cover = get_coverages(fwd, rev, coverage, bin_size=bin_size)
             density_val = get_density(fwd, rev, density_map=density_map)
-            return ps * cover * density_val
+            return ps * density_val
         return calc
 
 
