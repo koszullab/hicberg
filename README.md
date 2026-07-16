@@ -60,7 +60,8 @@ When running `hicberg`, there are a handful parameters which are especially impo
 * `-n`: name of the output folder that will contain the reconstructed data for a given experiment.
 * `-b`: Bin size of the matrices (default: 2000).
 * `-hcsp`: To process by hicstuff the pairs file.  (default: False).
-* 
+* `--start-stage`: Stage to start the pipeline (fastq, bam, groups, build, stats, rescue, final).
+* `--trim5`: Trim <int> bases from 5' (left) end of each read before alignment (default: 0).
 
 ### <a id="contributing"></a> Contributing
 
