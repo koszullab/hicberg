@@ -11,6 +11,10 @@
 
 Python package to reconstruct genomic signals coming from repeated elements in paired-end data like Hi-C, MicroC.  
 
+* Associated publication: [https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
+* Documentation and analyses examples: https://hicberg.readthedocs.io
+* scripts used for the analysis presented in the article [https://github.com/axelcournac/hicberg_bioanalysis](https://github.com/axelcournac/hicberg_bioanalysis)
+
 ### Installation  
 
 We highly recommend installing `Hicberg` through [Mamba](https://mamba.readthedocs.io/en/latest/mamba-installation.html#mamba-install).
