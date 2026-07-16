@@ -1049,7 +1049,7 @@ def _make_propensity_calculator(
 
     if mode == "density":
         def calc(fwd, rev, bin_size=bin_size, circular=circular):
-            return get_density(fwd, rev, density_map=density_map)
+            return get_density(fwd, rev, density_map=density_map, bin_size=bin_size)
         return calc
 
     if mode == "d1d2":
@@ -1073,8 +1073,8 @@ def _make_propensity_calculator(
                 ps = _get_intra_ps_optimized(fwd, rev, xs, weirds, uncuts, circles, circular)
             else:
                 ps = get_trans_ps(fwd, rev, trans_ps)
-            cover = get_coverages(fwd, rev, coverage, bin_size=bin_size)
-            density_val = get_density(fwd, rev, density_map=density_map)
+            # cover = get_coverages(fwd, rev, coverage, bin_size=bin_size)
+            density_val = get_density(fwd, rev, density_map=density_map, bin_size=bin_size)
             return ps * density_val
         return calc
 
