@@ -53,11 +53,14 @@ When running `hicberg`, there are a handful parameters which are especially impo
 
 * `-e DpnII,HinfI`: Restriction enzymes used in the Hi-C protocole (e.g DpnII, HinfI).
 * `-k 100`: maximum number of alignments returned by Bowtie2 for a read (for organisms with repetitive elements with a  large number of occurrences, we recommend limiting the search space).
-* `-m standard`: mode for the computation of probabilites, (standard uses coverage and p(s), full uses coverage, p(s) and density laws). 
+* `-m standard`: mode for the computation of probabilites: random, ps, standard (uses coverage and p(s)), full (uses coverage, p(s) and density laws). 
 * `--cpus 10`: number of cpu to allocate.
 * `-c plasmid2micron,chrMT`: circular chromosomes, molecule present in the genome (used in the computation of p(s) behavior).
 * `-o`: directory in which the output directory will be placed.
-* `-n`: name of the output folder that will contain the reconstructed data for a given experiment.   
+* `-n`: name of the output folder that will contain the reconstructed data for a given experiment.
+* `-b`: Bin size of the matrices (default: 2000).
+* `-hcsp`: To process by hicstuff the pairs file.  (default: False).
+* 
 
 ### <a id="contributing"></a> Contributing
 
