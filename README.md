@@ -48,7 +48,7 @@ Differents modes can be used to compute the probabilities of alignments for the 
 ### Example
 
 ```bash
-hicberg pipeline -e DpnII,HinfI --cpus 8 -o /home/bob/ -n output_repo/ yeast_reference_genome.fa  reads_R1.fastq reads_R2.fastq 
+hicberg pipeline -e DpnII,HinfI --cpus 8 -o /home/bob/ -n output_repo_library1/ yeast_reference_genome.fa  reads_R1.fastq reads_R2.fastq 
 ```
 
 ### Important options 
