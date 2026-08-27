@@ -242,15 +242,15 @@ def pipeline(
             
             hom.concatenate_bam(bam_file1 = "group1.1.bam", bam_file2  = "group2.1.rescued.bam", 
                               cpus = 8, 
-                              output_name = "groups1_2.1.bam",
+                              output_name = "groups1_and_2.1.bam",
                               output_dir = output_folder)
             
             hom.concatenate_bam(bam_file1 = "group1.2.bam", bam_file2  = "group2.2.rescued.bam", 
                               cpus = 8,
-                              output_name = "groups1_2.2.bam",
+                              output_name = "groups1_and_2.2.bam",
                               output_dir = output_folder)
 
-            hom.bam_to_bigwig(bam_file1 = "groups1_2.1.bam", bam_file2  = "groups1_2.2.bam", 
+            hom.bam_to_bigwig(bam_file1 = "groups1_and_2.1.bam", bam_file2  = "groups1_and_2.2.bam", 
                               output_dir = output_folder,
                               output_name  = "signal_rescued.bw")
             

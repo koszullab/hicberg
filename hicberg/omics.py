@@ -237,7 +237,7 @@ def concatenate_bam(bam_file1 : str = "group1.1.bam",
                     bam_file2 : str = "group2.1.rescued.bam", 
                     cpus : int = 8, 
                     output_dir : str = None,
-                    output_name : str = "groups1_2.1.bam") -> None:
+                    output_name : str = "groups1_and_2.1.bam") -> None:
     """
     Concatenate 2 bam files.
 
@@ -252,7 +252,7 @@ def concatenate_bam(bam_file1 : str = "group1.1.bam",
     output_dir : str, optional
         Output directory, by default None
     output_name : str, optional
-        Output name, by default groups1_2.1.bam
+        Output name, by default groups1_and_2.1.bam
 
     """
     
