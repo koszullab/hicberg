@@ -64,17 +64,17 @@ def cli(chain=True):
 @click.option("--blacklist", "-B", required = False, default = None, type = str, show_default = True, metavar = "<str>", help = "Blacklisted coordinates to exclude reads for statistical learning. Provide either a bed file or a list of coordinates coma separated using UCSC format.")
 @click.option("--hicstuff_process_bool", "-hcsp", required = False, default = 'False', type = str, show_default = True, metavar = "<str>", help = "To process by hicstuff the pairs file.")
 @click.option("--rate", "-r", required = False, default = 1.0, type = float, show_default = True, metavar = "<float>", help = "Rate to use for sub-sampling restriction map.")
-@click.option("--distance", "-D", required = False, default = 1000, type = int, show_default = True, metavar = "<int>", help = "Maximum distance beyond which pairs are discarded in omics mode.")
+@click.option("--dist_min_omics", "-dmin", required = False, default = 100, type = int, show_default = True, metavar = "<int>", help = "Minimal distance beyond which pairs are discarded in omics mode.")
+@click.option("--dist_max_omics", "-dmax", required = False, default = 1000, type = int, show_default = True, metavar = "<int>", help = "Maximal distance beyond which pairs are discarded in omics mode.")
 
-
-def pipeline_cmd(data, index, name, cpus, patch_small, patch_large, mode, output, max_alignment, trim5, sensitivity, bin_size, enzyme, circular, mapq, start_stage, exit_stage, force, blacklist, hicstuff_process_bool, rate, distance):
+def pipeline_cmd(data, index, name, cpus, patch_small, patch_large, mode, output, max_alignment, trim5, sensitivity, bin_size, enzyme, circular, mapq, start_stage, exit_stage, force, blacklist, hicstuff_process_bool, rate, dist_min_omics,dist_max_omics):
     """
     Hi-C pipeline to generate contact maps including reads from repeated elements from fastq files.
     """
     hpp.pipeline(genome = data[0], fq_for = data[1], fq_rev = data[2], index = index, name = name, output_dir = output, cpus = cpus, 
                  patch_small=patch_small, patch_large=patch_large, mode = mode, nb_chunks = 2 * cpus,
                  max_alignment = max_alignment,  sensitivity = sensitivity, trim5 = trim5, bin_size = bin_size, enzyme = enzyme, 
-                 circular = circular, mapq = mapq, start_stage = start_stage, exit_stage = exit_stage, force = force, blacklist = blacklist, hicstuff_process_bool=hicstuff_process_bool, rate = rate, distance = distance)
+                 circular = circular, mapq = mapq, start_stage = start_stage, exit_stage = exit_stage, force = force, blacklist = blacklist, hicstuff_process_bool=hicstuff_process_bool, rate = rate, dist_min_omics = dist_min_omics,dist_max_omics = dist_max_omics)
     return
 
 @click.command(context_settings = CONTEXT_SETTINGS, epilog = epilogs["general"], options_metavar = "<options>")
@@ -82,7 +82,8 @@ def pipeline_cmd(data, index, name, cpus, patch_small, patch_large, mode, output
 @click.option("--name", "-n", required = False, default = None, type = str, show_default = True, metavar = "<str>",  help = "Name of the output folder to create. If not set, 'sample' is used.")
 @click.option("--force", "-f", is_flag = True, help = "Set if previous analysis files are deleted.")
 @click.option("--hicstuff_process_bool", "-hcsp", required = False, default = 'False', type = str, show_default = True, metavar = "<str>", help = "To process by hicstuff the pairs file.")
-
+@click.option("--dist_min_omics", "-dmin", required = False, default = 100, type = int, show_default = True, metavar = "<int>", help = "Minimal distance beyond which pairs are discarded in omics mode.")
+@click.option("--dist_max_omics", "-dmax", required = False, default = 1000, type = int, show_default = True, metavar = "<int>", help = "Maximal distance beyond which pairs are discarded in omics mode.")
 
 def create_folder_cmd(output_dir, force, name):
     """

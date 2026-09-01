@@ -39,7 +39,6 @@ def pipeline(
         enzyme  : list[str] = ["DpnII", "HinfI"],
         circular : str = "", 
         rate : float = 1.0, 
-        distance : int = 1000, 
         bin_size : int = 2000, 
         nb_chunks : int = 1,
         mode : str = "standard",
@@ -49,6 +48,8 @@ def pipeline(
         cpus : int = 4, 
         patch_small : int = 15,
         patch_large : int = 45,
+        dist_min_omics : int =100,
+        dist_max_omics : int =1000,
         output_dir : str = None, 
         force : bool = False, 
         hicstuff_process_bool = "False",
@@ -242,6 +243,7 @@ def pipeline(
             # hom.bedgraph_to_bigwig(bedgraph_file = "coverage.bedgraph", chromosome_sizes = "chromosome_sizes.txt", output_dir = output_folder)
             
             hom.bam_to_bigwig(bam_file1 = "group1.1.bam", bam_file2  = "group1.2.bam", 
+                              dist_min_omics=dist_min_omics, dist_max_omics=dist_max_omics,
                               output_dir = output_folder,
                               output_bam="group.1.2.repaired.bam",
                               output_name  = "signal_unrescued.bw") 
@@ -257,6 +259,7 @@ def pipeline(
                               output_dir = output_folder)
 
             hom.bam_to_bigwig(bam_file1 = "groups1_and_2.1.bam", bam_file2  = "groups1_and_2.2.bam", 
+                              dist_min_omics=dist_min_omics, dist_max_omics=dist_max_omics,
                               output_dir = output_folder,
                               output_bam="group.1.2.repaired.bam",
                               output_name  = "signal_rescued.bw")
