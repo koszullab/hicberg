@@ -4,7 +4,14 @@ import numpy as np
 
 import hicberg.io as hio
 from hicberg import logger
+import logging
+import tempfile
+from collections import defaultdict
 
+logger = logging.getLogger(__name__)
+
+import pysam
+from collections import defaultdict
 
 def preprocess_pairs(pairs_file : str = "rescued.pairs", threshold : int = 1000, output_dir : str = None) -> None:
     """
@@ -105,131 +112,8 @@ def format_chrom_sizes(chromosome_sizes : str = "chromosome_sizes.npy", output_d
 
     logger.info(f"Formated chromosome sizes saved at {chrom_size_bed_path} and {chrom_size_txt_path}")
 
-def get_bed_coverage(chromosome_sizes : str = "chromosome_sizes.bed", pairs_file : str = "preprocessed_pairs.pairs", output_dir : str = None) -> None:
-    """
-    Get bed coverage from pairs file (using bedtools).
 
-    Parameters
-    ----------
-    chromosome_sizes : str, optional
-        Path to chromsomes sizes files (.bed format), by default "chromosome_sizes.bed"
-    pairs_file : str, optional
-        Path to processed pairs files (columns : chrom, start, end, count), by default "preprocessed_pairs.pairs"
-    output_dir : str, optional
-        Path where the coverage (.bed) will be saved, by default None
-    """    
-
-    output_dir_path = Path(output_dir)
-    if not output_dir_path.is_dir():
-        raise IOError(f"Output directory {output_dir} not found. Please provide a valid path.")
-
-    chrom_size_path = Path(output_dir, chromosome_sizes)
-
-    pairs_path = Path(output_dir, pairs_file)
-
-    if not chrom_size_path.is_file():
-            
-        raise IOError(f"Pairs file {chrom_size_path} not found. Please provide a valid path.")
-    
-    if not pairs_path.is_file():
-                
-        raise IOError(f"Pairs file {pairs_path} not found. Please provide a valid path.")
-    
-    bed_coverage_path = Path(output_dir_path , "coverage.bed")
-    
-    bedtools_cmd = f"bedtools coverage -a {str(chrom_size_path)} -b {str(pairs_path)} -d"
-
-    with open(bed_coverage_path, "w") as f_out:
-
-        sp.run(bedtools_cmd, shell=True, stdout=f_out)
-
-    f_out.close()
-
-    logger.info(f"Saved data coverage at {bed_coverage_path}")
-
-def get_bedgraph(bed_coverage : str = "coverage.bed", output_dir : str = None) -> None:
-    """
-    Convert bed coverage to bedgraph format.
-    Format is : chrom, start, end, count.
-    Start and end are different by 1bp (end  = start + 1).
-
-    Parameters
-    ----------
-    bed_coverage : str, optional
-        Path to coverage (.bed), by default "coverage.bed"
-    output_dir : str, optional
-        Path where the coverage (.bedgraph) will be saved, by default None
-    """    
-    output_dir_path = Path(output_dir)
-    if not output_dir_path.is_dir():
-        raise IOError(f"Output directory {output_dir} not found. Please provide a valid path.")
-
-    bed_coverage_path = Path(output_dir, bed_coverage)
-
-    if not bed_coverage_path.is_file():
-            
-        raise IOError(f"Pairs file {bed_coverage_path.name} not found. Please provide a valid path.")
-    
-    bed_handler = open(bed_coverage_path, "r")
-
-    bedgraph_coverage_path = Path(output_dir_path, "coverage.bedgraph")
-
-    with open(bedgraph_coverage_path, "w") as f_out:
-
-        for line in bed_handler:
-
-            chromosome, start, end, index, count = line.split("\t")
-
-            if end == index:
-                continue
-
-            f_out.write(f"{chromosome}\t{int(index)}\t{int(index) + 1}\t{count}")
-
-    f_out.close()
-    bed_handler.close()
-    
-def bedgraph_to_bigwig(bedgraph_file : str = "coverage.bedgraph", chromosome_sizes : str = "chromosome_sizes.txt", output_dir : str = None) -> None:
-    """
-    Convert bedgraph to bigwig format.
-
-    Parameters
-    ----------
-    bedgraph_file : str, optional
-        Path to coverage (.bedgraph), by default "coverage.bedgraph"
-    chromosome_sizes : str, optional
-        Path to chromosome sizes file (chrom_id, size), by default "chromosome_sizes.txt"
-    output_dir : str, optional
-        [description], by default None
-
-    Raises
-    ------
-    IOError
-        [description]
-    IOError
-        [description]
-    IOError
-        [description]
-    """    
-    output_dir_path = Path(output_dir)
-    if not output_dir_path.is_dir():
-        raise IOError(f"Output directory {output_dir} not found. Please provide a valid path.")
-
-    bedgraph_coverage_path = Path(output_dir, bedgraph_file)
-    if not bedgraph_coverage_path.is_file():
-        raise IOError(f"Pairs file {bedgraph_coverage_path.name} not found. Please provide a valid path.")
-    
-    chromosome_sizes_path = Path(output_dir, chromosome_sizes)
-    if not bedgraph_coverage_path.is_file():
-        raise IOError(f"Pairs file {chromosome_sizes_path.name} not found. Please provide a valid path.")
-    
-    output_bigwig_path = Path(output_dir, "signal.bw")
-    
-    bedgraphtobigwig_cmd = f"bedGraphToBigWig {bedgraph_coverage_path} {chromosome_sizes_path} {output_bigwig_path}"
-
-    sp.run([bedgraphtobigwig_cmd], shell = True)
-
-    logger.info(f"Saved data in BigWig format at {output_bigwig_path}")
-    
+   
 
 # alternative process (no need to install bedgraph or bedGraphToBigWig)
 
@@ -265,85 +149,208 @@ def concatenate_bam(bam_file1 : str = "group1.1.bam",
     bam_file1 = Path(output_dir, bam_file1)
     bam_file2 = Path(output_dir, bam_file2)   
         
-    cmd = f"samtools merge -@ {cpus} {output_name} {bam_file1} {bam_file2}"
+    cmd = f"samtools merge -@ {cpus} -f {output_name} {bam_file1} {bam_file2}"
     sp.run([cmd], shell = True)
         
-    logger.info(f"Saved data in BigWig format at {output_dir}")           
+    logger.info(f"Saved data at {output_dir}")           
           
      
-def bam_to_bigwig(bam_file1 : str = "groups1_2.1.bam", bam_file2 : str = "groups1_2.2.bam", 
-                  dist_min_omics : int = 100, dist_max_omics : int = 1000,
-                  cpus : int = 8, 
-                  output_dir : str = None,
-                  output_name : str = "signal.bw") -> None:
-    """
-    Convert bam files to a bigwig file (.bw).
 
-    Parameters
-    ----------
-    bam_file1 : str, optional
-        Path to bam file 1 by default groups1_2.1.bam
-    bam_file2 : str, optional
-        Path to bam file 2 by default groups1_2.2.bam 
-    dist_min_omics : int, optional
-        Minimal distance between reads to keep, by default 100    
-    dist_max_omics : int, optional
-        Maximal distance between reads to keep, by default 1000    
-    cpus : int, optional
-        Number of cpus to use for the merging, by default 8    
-    output_dir : str, optional
-        Output directory, by default None
-    output_name : str, optional
-        Output name, by default signal.bw
-    """    
-    
+def reconstruct_paired_bam(bam_file1: str, 
+                           bam_file2: str, 
+                           output_bam: str = None ) -> None:
+    """
+    Reconstruit un BAM paired-end à partir de deux BAM alignés en single-end.
+    Suppose que bam_file1 contient les R1 et bam_file2 les R2, avec les mêmes noms de query.
+    """
+
+    # Ouvrir le premier BAM pour récupérer le header
+    with pysam.AlignmentFile(bam_file1, "rb") as bam1:
+        header_dict = bam1.header.to_dict()
+
+    # Ajouter un tag @PG pour documenter la transformation
+    pg_entries = header_dict.get("PG", [])
+    if isinstance(pg_entries, dict):  # parfois pysam retourne un dict unique
+        pg_entries = [pg_entries]
+    pg_entries.append({
+        "ID": "reconstruct_paired",
+        "PN": "reconstruct_paired",
+        "CL": f"reconstruct_paired_bam({bam_file1}, {bam_file2}, {output_bam})",
+        "VN": "1.0"
+    })
+    header_dict["PG"] = pg_entries
+
+    # Recréer le header
+    new_header = pysam.AlignmentHeader.from_dict(header_dict)
+
+    with (
+        pysam.AlignmentFile(bam_file1, "rb") as bam1,
+        pysam.AlignmentFile(bam_file2, "rb") as bam2,
+        pysam.AlignmentFile(output_bam, "wb", header=new_header) as out
+    ):
+
+        # Indexer les R1 par nom de read
+        r1_by_name = defaultdict(list)
+        for read in bam1:
+            r1_by_name[read.query_name].append(read)
+
+        paired_count = 0
+        unpaired_r2 = 0
+        unpaired_r1 = 0
+        diff_chr = 0
+
+        for r2 in bam2:
+            mates = r1_by_name.get(r2.query_name, [])
+
+            if not mates:
+                unpaired_r2 += 1
+                continue
+
+            # Prendre le premier R1 disponible avec ce nom
+            r1 = mates.pop(0)
+            if not mates:
+                del r1_by_name[r2.query_name]
+
+            # Vérifier qu'ils sont sur le même chromosome
+            if r1.reference_id != r2.reference_id:
+                diff_chr += 1
+                # continue
+
+            # Coordonnées
+            r1_start = r1.reference_start
+            r2_start = r2.reference_start
+            r1_end = r1.reference_end
+            r2_end = r2.reference_end
+
+            if r1_end is None or r2_end is None:
+                unpaired_r2 += 1
+                continue
+
+            leftmost_start = min(r1_start, r2_start)
+            rightmost_end = max(r1_end, r2_end)
+            tlen = rightmost_end - leftmost_start
+
+            # Orientation conventionnelle paired-end : R1 forward, R2 reverse
+            # On garde l'orientation d'origine
+            r1_is_reverse = r1.is_reverse
+            r2_is_reverse = r2.is_reverse
+            is_proper = (not r1_is_reverse) and r2_is_reverse
+
+            # --- Mettre à jour R1 ---
+            r1.flag = 0x1      # PAIRED
+            r1.flag |= 0x40    # READ1
+            if is_proper:
+                r1.flag |= 0x2  # PROPER_PAIR
+            if r1_is_reverse:
+                r1.flag |= 0x10  # READ_REVERSE
+            if r2_is_reverse:
+                r1.flag |= 0x20  # MATE_REVERSE
+
+            r1.next_reference_id = r2.reference_id
+            r1.next_reference_start = r2.reference_start
+            r1.template_length = tlen if r1_start == leftmost_start else -tlen
+
+            # --- Mettre à jour R2 ---
+            r2.flag = 0x1      # PAIRED
+            r2.flag |= 0x80    # READ2
+            if is_proper:
+                r2.flag |= 0x2  # PROPER_PAIR
+            if r2_is_reverse:
+                r2.flag |= 0x10  # READ_REVERSE
+            if r1_is_reverse:
+                r2.flag |= 0x20  # MATE_REVERSE
+
+            r2.next_reference_id = r1.reference_id
+            r2.next_reference_start = r1.reference_start
+            r2.template_length = tlen if r2_start == leftmost_start else -tlen
+
+            out.write(r1)
+            out.write(r2)
+            paired_count += 1
+
+        # Éventuellement écrire les R1 restants sans R2 (singletons)
+        for remaining in r1_by_name.values():
+            unpaired_r1 += len(remaining)
+            # Optionnel : les écrire en single-end
+            # for r1 in remaining:
+            #     out.write(r1)
+
+    print(f"{bam_file1}")
+    print(f"{bam_file2}")
+    print(f"Paired reads written: {paired_count}")
+    print(f"R1 without R2 mate: {unpaired_r1}")
+    print(f"R2 without R1 mate: {unpaired_r2}")
+    print(f"R1/R2 on different chromosomes: {diff_chr}")
+
+
+
+
+
+def bam_to_bigwig(
+    bam_file1: str = "group1.1.bam",
+    bam_file2: str = "group1.2.bam",
+    dist_min_omics: int = 100,
+    dist_max_omics: int = 1000,
+    cpus: int = 8,
+    output_dir: str = None,
+    output_bam: str = "group.1.2.repaired.bam", 
+    output_name: str = "signal.bw",
+) -> None:
+    """
+    Convert two BAM files to a BigWig file (.bw).
+    """
+
     output_dir_path = Path(output_dir)
     if not output_dir_path.is_dir():
         raise IOError(f"Output directory {output_dir} not found.")
 
-    output_bigwig_path = Path(output_dir, output_name)
-    bam_file1 = Path(output_dir, bam_file1)
-    bam_file2 = Path(output_dir, bam_file2)
-    
-    # concatenation of both mates
-    cmd = f"samtools merge -f  -@ {cpus} combined.bam {bam_file1} {bam_file2}"
-    sp.run([cmd], shell = True)
-    
-    # sort according to read name
-    cmd = f"samtools sort -N -@ {cpus} -o combined_nsorted.bam combined.bam"
-    sp.run([cmd], shell = True)
-    
-    # fix mates
-    cmd = f"samtools fixmate -m -@ {cpus} combined_nsorted.bam combined_fixmate.bam"   # in.bam  out.bam 
-    sp.run([cmd], shell = True)
-    
-    # sort according to genomic position
-    cmd = f"samtools sort -@ {cpus} -o combined_fixmate.sorted.bam combined_fixmate.bam"
-    sp.run([cmd], shell = True)
-    
-    cmd = f"samtools index -@ {cpus} combined_fixmate.sorted.bam"
-    sp.run([cmd], shell = True)
-    
-    # creation of the bw file     
-    cmd = f"bamCoverage -b combined_fixmate.sorted.bam -o {output_bigwig_path} --binSize 1 --extendReads --normalizeUsing CPM --numberOfProcessors {cpus} --skipNonCoveredRegions"
-    sp.run([cmd], shell = True)
-    
-    logger.info(f"Saved data in BigWig format at {output_bigwig_path}")
-    
-    
-    
+    # Chemins d'entrée : absolus si fournis, sinon relatifs à output_dir
+    bam1 = Path(bam_file1) if Path(bam_file1).is_absolute() else output_dir_path / bam_file1
+    bam2 = Path(bam_file2) if Path(bam_file2).is_absolute() else output_dir_path / bam_file2
+    bam_file = Path(output_dir, output_bam)
+    bw_file = Path(output_dir, output_name)
 
-# bam_to_bigwig(bam_file1 = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/group1.1.bam", bam_file2  = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/group1.2.bam", 
-#                   output_dir = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/",
-#                   output_name  = "signal_unrescued.bw")  
+    for b in (bam1, bam2):
+        if not b.is_file():
+            raise FileNotFoundError(f"BAM file not found: {b}")
 
+    # pairing the 2 files:
+    reconstruct_paired_bam(
+            bam_file1 = bam1,
+            bam_file2 = bam2,
+            output_bam = bam_file,
+        )
     
-# bam_to_bigwig(bam_file1 = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/groups1_2.1.bam", bam_file2  = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/groups1_2.2.bam", 
-#                   output_dir = "/media/axel/EVO/benchmark_part2/hicberg_testing/out_SRR5399542/alignments/",
-#                   output_name  = "signal_rescued.bw")     
+    # Trier et indexer (bamCoverage a besoin d'un BAM trié par coordonnées)
+    sorted_bam = bam_file.with_suffix(".sorted.bam")
+    pysam.sort("-@", "8", "-o", str(sorted_bam), str(bam_file))
+    pysam.index(str(sorted_bam))
+
+    print(f"Sorted output: {sorted_bam}")
     
-    
-    
+    # Conversion en BigWig
+    sp.run(
+        [
+            "bamCoverage",
+            "-b", str(sorted_bam),
+            "-o", str(bw_file),
+            "--binSize", "1",
+            "--extendReads",
+            "--minFragmentLength", str(dist_min_omics),
+            "--maxFragmentLength", str(dist_max_omics),
+            "--normalizeUsing", "None",
+            "--numberOfProcessors", str(cpus),
+            "--skipNonCoveredRegions",
+        ],
+        check=True,
+    )
+
+    logger.info(f"Saved data in BigWig format at {output_name}")    
+
+
+
+
+       
    
     
     

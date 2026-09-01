@@ -221,7 +221,12 @@ def pipeline(
         # Delete chunks
         folder_to_delete = Path(output_folder) / 'chunks'
         rmtree(folder_to_delete)
-
+            
+    if exit_stage_n  == 5:
+        logger.info(f"Ending Hicberg pipeline at {exit_stage}")
+        return
+    
+    if start_stage_n  <= 6:
         hio.build_pairs(mode = True, output_dir = output_folder)
         hio.build_matrix(pairs='rescued.pairs', cpus = cpus, balance = True, mad_max=1000, output_dir = output_folder)
         
@@ -238,6 +243,7 @@ def pipeline(
             
             hom.bam_to_bigwig(bam_file1 = "group1.1.bam", bam_file2  = "group1.2.bam", 
                               output_dir = output_folder,
+                              output_bam="group.1.2.repaired.bam",
                               output_name  = "signal_unrescued.bw") 
             
             hom.concatenate_bam(bam_file1 = "group1.1.bam", bam_file2  = "group2.1.rescued.bam", 
@@ -252,13 +258,9 @@ def pipeline(
 
             hom.bam_to_bigwig(bam_file1 = "groups1_and_2.1.bam", bam_file2  = "groups1_and_2.2.bam", 
                               output_dir = output_folder,
+                              output_bam="group.1.2.repaired.bam",
                               output_name  = "signal_rescued.bw")
             
-    if exit_stage_n  == 5:
-        logger.info(f"Ending Hicberg pipeline at {exit_stage}")
-        return
-    
-    if start_stage_n  <= 6:
         logger.info("Start plotting results")
         p1 = Process(target = hpl.plot_laws, kwargs = dict(output_dir = output_folder))
         p2 = Process(target = hpl.plot_trans_ps, kwargs = dict(output_dir = output_folder))
