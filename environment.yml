@@ -1,11 +1,18 @@
-  name: hicberg
+name: hicberg
 channels:
   - conda-forge
   - bioconda
   - defaults
-
 dependencies:
   - python=3.10
-  - hicberg
+  - pip
   - bowtie2
   - samtools
+  - bedtools
+  - ucsc-bedgraphtobigwig
+  - biopython
+  - cooler
+  - h5py
+  - hicstuff >=3.2.4,<4
+  - numpy >=1.26.4,<2
+  - pytest
