@@ -40,6 +40,12 @@ To install the last version (1.0.2) directly with mamba, example of command:
 mamba install -c conda-forge -c bioconda hicberg
 ```
 
+To test on the test dataset : 
+```bash
+hicberg pipeline -e DpnII  -f data_test/sub_genome.fa data_test/forward_reads_test.fq.gz data_test/reverse_reads_test.fq.gz
+```
+The pipeline should run in a few minutes for the test dataset.
+
 ### Usage
 
 `Hicberg` requires a FASTA file containing the reference genome against which the reads will be aligned, as well as two paired-end FASTQ files generated from a Hi-C, MicroC, ChIP-seq, or Mnase experiment. You can always run:
