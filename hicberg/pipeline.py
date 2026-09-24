@@ -82,9 +82,9 @@ def pipeline(
         
     logger.info(f"Hicberg command used : {' '.join(sys.argv)}")
 
-    if mode not in ["random", "ps", "coverage", "density", "standard", "full", "omics", "d1d2"]:
-        logger.error(f"The provided mode {mode} must be: random ps coverage density standard full omics d1d2.")
-        raise IOError(f"The provided mode {mode} must be: random ps coverage density standard full omics d1d2.")   
+    if mode not in ["random", "ps", "coverage", "density", "standard", "full", "omics","omics2", "d1d2"]:
+        logger.error(f"The provided mode {mode} must be: random ps coverage density standard full omics omics2 d1d2.")
+        raise IOError(f"The provided mode {mode} must be: random ps coverage density standard full omics omics2 d1d2.")   
         
     if start_stage not in ["fastq", "bam", "groups", "build", "stats", "rescue", "final"]:
         logger.error(f"Start_stage {start_stage} must be: fastq bam groups build stats rescue final.")

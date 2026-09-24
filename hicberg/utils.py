@@ -1213,6 +1213,38 @@ def max_consecutive_nans(vector : np.ndarray) -> int:
     else:
         idx = np.nonzero(mask[1:] != mask[:-1])[0]
         return (idx[1::2] - idx[::2]).max()
+def fill_nan_neighbors(y, k=2, degree=2):
+    """
+    Fill NaN values in y by fitting a polynomial on the k known points
+    located just before and just after each gap.
+
+    k      : number of neighbors on each side (k=2 → 4 points)
+    degree : polynomial degree
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.arange(len(y))
+    known = ~np.isnan(y)
+    y = y.copy()
+
+    x_c, y_c = x[known], y[known]
+
+    for xm in x[~known]:
+        # k known points just before / just after
+        before = x_c < xm
+        after = x_c > xm
+        xv = np.concatenate([x_c[before][-k:], x_c[after][:k]])
+        yv = np.concatenate([y_c[before][-k:], y_c[after][:k]])
+
+        # curve edge: not enough neighbors on one side
+        # → use the 2k closest known points (= extrapolation)
+        if len(xv) < 2 * k:
+            order = np.argsort(np.abs(x_c - xm))[:2 * k]
+            xv, yv = x_c[order], y_c[order]
+
+        d = min(degree, len(xv) - 1)   # safety if very few points
+        y[xm] = np.polyval(np.polyfit(xv, yv, d), xm)
+
+    return y
 
 def mad_smoothing(vector : np.ndarray[int] = None, window_size : int | str = "auto", nmads : int = 2) -> np.ndarray[int]:
     """
@@ -1325,15 +1357,16 @@ def mad_smoothing2(y : np.ndarray[int] = None,
     y_clean[~mask] = np.nan
     
     # --- ÉTAPE 2 : enveloppe supérieure ---
-    s = pd.Series(y_clean)
+    #s = pd.Series(y_clean)
     
     # Percentile haut glissant (suivit le haut des points)
-    upper = s.rolling(envelope_window, center=True, min_periods=1).quantile(percentile/100)
+    #upper = s.rolling(envelope_window, center=True, min_periods=1).quantile(percentile/100)
     
     # Petit lissage de l'enveloppe (optionnel)
-    upper_smooth = upper.rolling(smooth_window, center=True, min_periods=1).mean()
-    y_fitted = upper_smooth.values
+    #upper_smooth = upper.rolling(smooth_window, center=True, min_periods=1).mean()
+    #y_fitted = upper_smooth.values
     
+    y_fitted = fill_nan_neighbors(y_clean, k=2, degree=1)
     return y_fitted
 
 
