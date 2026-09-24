@@ -34,7 +34,11 @@ Then install last stable version of `Hicberg` 1.0.2 from github:
 ```bash
 pip install git+https://github.com/koszullab/hicberg.git@main
 ```
-1.0.2 version will be available soon on bioconda. 
+ 
+To install the last version (1.0.2) directly with mamba, example of command: 
+```bash
+mamba install -c conda-forge -c bioconda hicberg
+```
 
 ### Usage
 
