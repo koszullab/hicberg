@@ -48,7 +48,8 @@ The pipeline should run in a few minutes for the test dataset.
 
 ### Usage
 
-`Hicberg` requires a FASTA file containing the reference genome against which the reads will be aligned, as well as two paired-end FASTQ files generated from a Hi-C, MicroC, ChIP-seq, or Mnase experiment. You can always run:
+`Hicberg` requires a FASTA file containing the reference genome against which the reads will be aligned, as well as two paired-end FASTQ files generated from a Hi-C, Micro-C, ChIP-seq, or MNase-seq experiment. 
+You can always run:
 
 ```bash
 hicberg --help
