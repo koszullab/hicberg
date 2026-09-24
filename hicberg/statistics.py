@@ -1033,7 +1033,7 @@ def _make_propensity_calculator(
             return 1.0
         return calc
 
-    if mode == "ps":
+    if mode in ("ps", "omics"):
         def calc(fwd, rev, bin_size=bin_size, circular=circular):
             if hut.is_intra_chromosome(fwd, rev):
                 ps = _get_intra_ps_optimized(fwd, rev, xs, weirds, uncuts, circles, circular)
@@ -1057,7 +1057,7 @@ def _make_propensity_calculator(
             return get_d1d2(fwd, rev, restriction_map, d1d2)
         return calc
 
-    if mode in ("standard", "omics"):
+    if mode in ("standard", "omics2"):
         def calc(fwd, rev, bin_size=bin_size, circular=circular):
             if hut.is_intra_chromosome(fwd, rev):
                 ps = _get_intra_ps_optimized(fwd, rev, xs, weirds, uncuts, circles, circular)

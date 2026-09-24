@@ -235,7 +235,7 @@ def pipeline(
             hio.hicstuff_process(pairs='rescued.pairs', cpus = cpus, enzyme=enzyme, genome = genome, output_dir = output_folder)
             hio.build_matrix(pairs='rescued.pairs.filtered', cpus = cpus, balance = True, mad_max=1000, output_dir = output_folder)
         
-        if mode == "omics":
+        if mode == "omics" or mode == "omics2" :
             # hom.preprocess_pairs(pairs_file = "rescued.pairs", threshold  = distance, output_dir = output_folder)
             # hom.format_chrom_sizes(chromosome_sizes = "chromosome_sizes.npy", output_dir = output_folder)
             # hom.get_bed_coverage(chromosome_sizes = "chromosome_sizes.bed", pairs_file = "preprocessed_pairs.pairs", output_dir = output_folder)
