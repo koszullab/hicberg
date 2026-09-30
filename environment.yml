@@ -9,10 +9,10 @@ dependencies:
   - bowtie2
   - samtools
   - bedtools
-  - ucsc-bedgraphtobigwig
   - biopython
   - cooler
   - h5py
   - hicstuff >=3.2.4,<4
   - numpy >=1.26.4,<2
   - pytest
+  - genmap
