@@ -11,7 +11,7 @@
 
 Python package to reconstruct genomic signals coming from repeated elements in paired-end data like Hi-C, Micro-C.  
 
-* Associated publication: [https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
+* Associated publication: [https://genome.cshlp.org/content/36/11/2322](https://genome.cshlp.org/content/36/11/2322)
 * Documentation and analyses examples: https://hicberg.readthedocs.io
 * scripts used for the analysis presented in the article [https://github.com/axelcournac/hicberg_bioanalysis](https://github.com/axelcournac/hicberg_bioanalysis)
 
@@ -115,6 +115,6 @@ coverage run --source=hicberg -m pytest -v tests --cov-report=xml
 
 ### <a id="citation"></a> Citation
 
-[https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1](https://www.biorxiv.org/content/10.1101/2025.06.20.660295v1)
+[https://genome.cshlp.org/content/36/11/2322](https://genome.cshlp.org/content/36/11/2322)
 
 
