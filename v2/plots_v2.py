@@ -28,7 +28,7 @@ import numpy as np                                    # noqa: E402
 
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
-PS_COUNTS, MAPPABILITY = "ps_counts.npz", "mappability.npy"
+PS_COUNTS, MAPPABILITY, COVERAGE_KEPT = "ps_counts.npz", "mappability.npy", "coverage_kept.npy"
 
 # Same colours as hicberg/plot.py
 LAWS = (
@@ -227,19 +227,26 @@ def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
     raw, smooth = load_dict(stats_dir, COVERAGE_RAW), load_dict(stats_dir, COVERAGE)
     smooth_ref = load_dict(compare_dir, COVERAGE) if compare_dir else None
     mappability = load_dict(stats_dir, MAPPABILITY)
+    kept = load_dict(stats_dir, COVERAGE_KEPT)
 
     with PdfPages(output_pdf) as pdf:
         for chrom in _chromosomes(smooth, smooth_ref):
             fig, ax = plt.subplots(figsize=(11, 5))
-            if chrom in raw:
+            if chrom in raw and kept is not None and chrom in kept:
+                x, k = np.arange(len(raw[chrom])), kept[chrom]
+                ax.plot(x[k], raw[chrom][k], "o", ms=1.5, color="cornflowerblue",
+                        label=f"raw {labels[0]} — bins kept", rasterized=True)
+                ax.plot(x[~k], raw[chrom][~k], "o", ms=2.5, color="red",
+                        label=f"raw {labels[0]} — bins excluded (interpolated)", rasterized=True)
+            elif chrom in raw:
                 ax.plot(raw[chrom], "o", ms=1, color="cornflowerblue",
                         label=f"raw {labels[0]}", rasterized=True)
             if chrom in smooth:
                 ax.plot(smooth[chrom], color="darkblue", lw=1,
-                        label=f"smoothed {labels[0]}")
+                        label=f"final {labels[0]} (coverage.npy)")
             if smooth_ref is not None and chrom in smooth_ref:
                 ax.plot(smooth_ref[chrom], color="orange", lw=1, alpha=0.8,
-                        label=f"smoothed {labels[1]}")
+                        label=f"final {labels[1]}")
             ax.set(title=f"Coverage — {chrom} — bins of {bin_size} bp",
                    xlabel="Bin number", ylabel="Number of reads")
             ax.grid(True, alpha=0.4)

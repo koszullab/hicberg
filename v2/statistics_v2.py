@@ -11,7 +11,9 @@ single streaming pass (constant memory, vectorised with numpy):
         circle (-/+, outward)  → circles.npy
         weird  (++ and --)     → weirds.npy
   - trans-chromosomal pseudo P(s)   → trans_ps.npy
-  - 1D coverage (raw + smoothed)    → coverage1.npy / coverage.npy
+  - 1D coverage (raw + final)       → coverage1.npy / coverage.npy
+        final = raw / mappable fraction (bins too unmappable interpolated)
+        with --mappability, otherwise mad_smoothing2 (previous version)
 
 Output file names and normalisations are the same as in the previous
 hicberg version (hicberg/statistics.py) so that both pipelines can be
@@ -49,6 +51,7 @@ COVERAGE_RAW   = "coverage1.npy"   # without smoothing
 COVERAGE       = "coverage.npy"    # smoothed
 PS_COUNTS      = "ps_counts.npz"   # raw counts, 4 orientations (QC)
 MAPPABILITY    = "mappability.npy" # fraction of mappable positions per coverage bin
+COVERAGE_KEPT  = "coverage_kept.npy"  # coverage bins used (others interpolated)
 
 # Orientation codes (after ordering reads by position)
 ORIENTATIONS = ("+-", "-+", "++", "--")   # uncut, circle, weird, weird
@@ -338,10 +341,86 @@ def compute_trans_ps(acc, lengths=None):
     return trans_ps
 
 
-def compute_coverages(acc, smooth=True):
+def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.8,
+                     min_mappable_bp=100, min_ratio=0.5, window=10, circular=False):
+    """
+    Coverage corrected by mappability, expressed per bin_size bp:
+      1. mappable length of each bin = fraction × effective width (the last
+         bin of a chromosome is shorter than bin_size)
+      2. valid bins: fraction (of the bin's own width) >= min_fraction, and
+         at least min_mappable_bp mappable positions (guard against tiny
+         remnants, e.g. 20 bp with 1 read × 100);
+         corrected = raw × bin_size / mappable length
+      3. low outliers: valid bins below min_ratio × the median of the
+         corrected coverage of the `window` closest valid bins on each side are excluded too (truly
+         under-covered bins, repeats seen by bowtie2 but not by GenMap)
+      4. excluded bins: linear interpolation between the closest valid bins
+         (periodic on circular chromosomes, constant beyond the ends)
+    Returns (corrected, valid) with valid = bins kept (not interpolated). If no
+    bin is valid, corrected is NaN everywhere (to be filled by the caller).
+    """
+    raw = np.asarray(raw, dtype=np.float64)
+    f = np.zeros(len(raw))
+    n = min(len(raw), len(fraction))
+    f[:n] = np.asarray(fraction)[:n]
+    widths = np.clip(chrom_size - np.arange(len(raw)) * bin_size, 0, bin_size)
+    mappable = f * widths
+
+    valid = (f >= min_fraction) & (mappable >= max(min_mappable_bp, 1e-9))
+    corrected = np.full(len(raw), np.nan)
+    corrected[valid] = raw[valid] * bin_size / mappable[valid]
+
+    if min_ratio > 0 and valid.sum() > 2:
+        # median of the `window` closest valid bins on each side (whatever the
+        # gap): an isolated bin after an unmappable stretch is compared to
+        # real neighbours, not to itself
+        idx = np.flatnonzero(valid)
+        vals = corrected[idx]
+        local = pd.Series(vals).rolling(2 * window + 1, center=True,
+                                        min_periods=1).median().to_numpy()
+        low = idx[vals < min_ratio * local]
+        valid[low] = False
+        corrected[low] = np.nan
+
+    if valid.any() and not valid.all():
+        idx = np.arange(len(raw))
+        corrected[~valid] = np.interp(idx[~valid], idx[valid], corrected[valid],
+                                      period=len(raw) if circular else None)
+    return corrected, valid
+
+
+def compute_coverages(acc, smooth=True, mappability=None, **correction):
+    """
+    Returns (raw, final, kept) coverages per chromosome.
+      - mappability = {chrom: fraction of mappable positions per coverage
+        bin}: final = correct_coverage(**correction) (no other smoothing),
+        kept = bins used (not interpolated). Chromosomes without any kept bin
+        get the genome-wide median.
+      - otherwise: final = mad_smoothing2 (previous version), or raw if not
+        smooth; kept = None.
+    """
     raw = acc.coverage_by_chrom()
+
+    if mappability is not None:
+        final, kept, empty = {}, {}, []
+        for i, (chrom, y) in enumerate(raw.items()):
+            final[chrom], kept[chrom] = correct_coverage(
+                y, mappability[chrom], acc.sizes[i], acc.bin_size,
+                circular=acc.circular[i], **correction)
+            if not kept[chrom].any():
+                empty.append(chrom)
+        if empty:
+            median = np.median(np.concatenate([v[np.isfinite(v)] for v in final.values()]))
+            for chrom in empty:
+                final[chrom][:] = median
+            print(f"  [warning] no kept bin on {empty}: genome-wide median coverage used")
+        total = sum(len(v) for v in raw.values())
+        n_out = sum(int((~v).sum()) for v in kept.values())
+        print(f"  {n_out} / {total} coverage bins excluded (unmappable or low outliers) → interpolated")
+        return raw, final, kept
+
     if not smooth:
-        return raw, raw
+        return raw, raw, None
 
     from hicberg.utils import mad_smoothing2
 
@@ -352,7 +431,7 @@ def compute_coverages(acc, smooth=True):
         except Exception as e:
             print(f"  [warning] coverage smoothing failed on {chrom}: {e} → raw values kept")
             smoothed[chrom] = y
-    return raw, smoothed
+    return raw, smoothed, None
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +441,8 @@ def compute_coverages(acc, smooth=True):
 def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         base=1.1, circular="", chunksize=5_000_000, smooth=True,
                         plots=True, mappability=None, map_resolution=100,
-                        min_mappability=1.0):
+                        min_mappability=1.0, coverage_min_fraction=0.8,
+                        coverage_min_bp=100, coverage_min_ratio=0.5):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -407,7 +487,9 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     print("Computing trans P(s) ...")
     trans_ps = compute_trans_ps(acc, map_lengths)
     print("Computing coverages ...")
-    cov_raw, cov_smooth = compute_coverages(acc, smooth)
+    cov_raw, cov_smooth, cov_kept = compute_coverages(
+        acc, smooth, map_coarse, min_fraction=coverage_min_fraction,
+        min_mappable_bp=coverage_min_bp, min_ratio=coverage_min_ratio)
 
     np.save(output_dir / XS,           acc.xs)
     np.save(output_dir / CHROM_SIZES,  chrom_sizes)
@@ -422,6 +504,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         **{c: v for c, v in acc.ps_counts_by_chrom().items()})
     if map_coarse is not None:
         np.save(output_dir / MAPPABILITY, map_coarse)
+    if cov_kept is not None:
+        np.save(output_dir / COVERAGE_KEPT, cov_kept)
 
     # --- Stats ---
     s = acc.stats
@@ -445,6 +529,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         lines += [
             f"mappability           : {mappability}",
             f"  resolution / min    : {map_resolution} bp / score >= {min_mappability}",
+            f"  coverage            : raw x {bin_size} / mappable bp; bins kept if fraction >= "
+            f"{coverage_min_fraction}, >= {coverage_min_bp} mappable bp, >= {coverage_min_ratio} x local median",
             f"  mappable genome     : {mappable:,.0f} / {total:,} bp ({100 * mappable / total:.1f}%)",
         ]
     else:
@@ -489,6 +575,14 @@ def main():
                         help="Resolution of the mappability mask for the P(s) areas (default=100)")
     parser.add_argument("--min_mappability", type=float, default=1.0,
                         help="Min GenMap score of a mappable position (default=1.0 = unique k-mer)")
+    parser.add_argument("--coverage_min_fraction", type=float, default=0.8,
+                        help="Coverage bins kept if their mappable fraction (of their own width) "
+                             "is >= this value, else interpolated (default=0.8)")
+    parser.add_argument("--coverage_min_bp", type=int, default=100,
+                        help="... and if they contain >= this number of mappable bp (default=100)")
+    parser.add_argument("--coverage_min_ratio", type=float, default=0.5,
+                        help="... and if their corrected coverage is >= this ratio x the local "
+                             "median of the 10 closest kept bins on each side; 0 to disable (default=0.5)")
     args = parser.parse_args()
 
     generate_statistics(
@@ -504,6 +598,9 @@ def main():
         mappability      = args.mappability,
         map_resolution   = args.map_resolution,
         min_mappability  = args.min_mappability,
+        coverage_min_fraction = args.coverage_min_fraction,
+        coverage_min_bp  = args.coverage_min_bp,
+        coverage_min_ratio = args.coverage_min_ratio,
     )
 
 

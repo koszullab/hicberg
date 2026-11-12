@@ -342,7 +342,25 @@ python3 statistics_v2.py unrescued.pairs ./stats ... \
   the noise floor (chrI 0.68 → 0.13, chrXVI 0.17 → 0.04). Still above: chrXII
   (rDNA), chrX, chrXI, chrIII.
 - coverage: unmappable bins = coverage drops (subtelomeres); `mad_smoothing2`
-  extrapolates over them → next step.
+  extrapolated over them, and even produced **negative coverages** (down to
+  -5923 on chrVIII, line fitted on a few neighbours and extended).
+
+**Coverage with mappability (`correct_coverage`)**, replaces `mad_smoothing2`:
+1. corrected = raw × 2000 / (fraction × effective width): the last, shorter
+   bin of each chromosome is scaled, not excluded
+2. bin kept if fraction (of its own width) ≥ 0.8 (`--coverage_min_fraction`)
+   and ≥ 100 mappable bp (`--coverage_min_bp`, guard against tiny remnants)
+3. low outliers excluded: corrected < 0.5 × median of the 10 closest kept
+   bins on each side (`--coverage_min_ratio`; closest *kept* bins, so that
+   an isolated bin after an unmappable stretch is not compared to itself)
+4. excluded bins: linear interpolation between kept bins (periodic if
+   circular, constant beyond the ends) → never negative
+
+Yeast: 632 / 6139 bins excluded (10%); final coverage / chromosome median
+between 0.45 and 1.75, no negative value. `coverage_kept.npy` = bins kept,
+shown in blue (kept) / red (excluded) on the coverage plots.
+Check: coverage ∝ mappable fraction holds for fraction ≥ 0.6 (ratio 0.92-1.00),
+not below 0.2 (median 0.37).
 
 ---
 

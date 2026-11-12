@@ -131,6 +131,70 @@ def test_intra_ps_circular_normalisation(acc):
     assert np.all(uncuts["circ"][acc.xs["circ"] >= 500] == 0)
 
 
+def test_correct_coverage_divides_and_interpolates():
+    raw = np.array([100, 50, 0, 0, 80, 100], dtype=float)
+    f   = np.array([1.0, 0.5, 0.1, 0.0, 0.8, 1.0])
+    cov, valid = st.correct_coverage(raw, f, 600, 100, min_fraction=0.5,
+                                     min_mappable_bp=0, min_ratio=0)
+    np.testing.assert_array_equal(valid, [True, True, False, False, True, True])
+    # 50/0.5 = 100, 80/0.8 = 100, holes interpolated between 100 and 100
+    np.testing.assert_allclose(cov, [100, 100, 100, 100, 100, 100])
+
+
+def test_correct_coverage_ends_and_circular():
+    raw = np.array([0, 10, 20, 30, 0], dtype=float)
+    f   = np.array([0, 1, 1, 1, 0], dtype=float)
+    lin, _ = st.correct_coverage(raw, f, 500, 100, min_ratio=0)
+    np.testing.assert_allclose(lin, [10, 10, 20, 30, 30])        # constant beyond ends
+    circ, _ = st.correct_coverage(raw, f, 500, 100, min_ratio=0, circular=True)
+    # wraps around: index 3 (30) → index 6 ≡ 1 (10) in 3 steps
+    np.testing.assert_allclose(circ, [30 - 2 * 20 / 3, 10, 20, 30, 30 - 20 / 3])
+
+
+def test_correct_coverage_short_last_bin_is_scaled_not_excluded():
+    # like the end of chrI: bins of 2 kb, last bin 490 bp wide
+    cov, valid = st.correct_coverage(np.array([2000., 2000., 490.]), np.ones(3), 4490, 2000,
+                                     min_ratio=0)
+    assert valid.all()
+    np.testing.assert_allclose(cov, [2000, 2000, 2000])          # 490 reads in 490 bp → 2000 / 2 kb
+
+
+def test_correct_coverage_tiny_remnant_excluded():
+    # last bin only 10 bp wide: below min_mappable_bp → interpolated, not × 10
+    cov, valid = st.correct_coverage(np.array([100., 100., 5.]), np.ones(3), 210, 100,
+                                     min_mappable_bp=50, min_ratio=0)
+    assert valid.tolist() == [True, True, False]
+    np.testing.assert_allclose(cov, [100, 100, 100])
+
+
+def test_correct_coverage_low_outlier_excluded():
+    raw = np.full(15, 100.)
+    raw[7] = 30                                                  # mappable but under-covered
+    cov, valid = st.correct_coverage(raw, np.ones(15), 1500, 100, min_ratio=0.5)
+    assert not valid[7] and valid.sum() == 14
+    np.testing.assert_allclose(cov, 100)
+    cov, valid = st.correct_coverage(raw, np.ones(15), 1500, 100, min_ratio=0)
+    assert valid.all() and cov[7] == 30
+
+
+def test_correct_coverage_isolated_low_bin_after_gap():
+    # like the end of chrI: 10 good bins, unmappable stretch, one low last bin
+    raw = np.r_[np.full(10, 2000.), np.zeros(5), 800.]
+    f = np.r_[np.ones(10), np.zeros(5), 1.]
+    cov, valid = st.correct_coverage(raw, f, 16 * 2000, 2000)
+    assert not valid[15]                                          # compared to real neighbours
+    np.testing.assert_allclose(cov[10:], 2000)                    # constant beyond the last kept bin
+
+
+def test_correct_coverage_longer_than_mask_and_empty():
+    cov, valid = st.correct_coverage(np.array([10., 10., 0.]), np.array([1., 1.]), 200, 100,
+                                     min_ratio=0)
+    np.testing.assert_allclose(cov, [10, 10, 10])                # extra bin = 0 bp wide
+    assert valid.tolist() == [True, True, False]
+    cov, valid = st.correct_coverage(np.array([5., 5.]), np.array([0., 0.]), 200, 100)
+    assert np.isnan(cov).all() and not valid.any()
+
+
 def test_load_chrom_sizes_from_sam_header(tmp_path):
     sam = tmp_path / "x.sam"
     sam.write_text("@HD\tVN:1.0\n@SQ\tSN:chrI\tLN:230490\n@SQ\tSN:chrII\tLN:822297\n"
