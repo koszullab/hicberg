@@ -1,0 +1,11 @@
+# Test data: stored outside the repository (e.g. /media/axel/EVO/data_for_v2)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Logs created by importing the previous hicberg package
+name_of_log.txt
+hicberg_*.log

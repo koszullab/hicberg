@@ -37,32 +37,43 @@ bowtie2 --very-sensitive-local --reorder (NO -k, NO trim)
  1.sam     2.sam
       \   /
        ▼ ▼
-  streaming_classifier.py
+  streaming_classifier_v2.py
        |
   ┌────┴─────────────┐
   │                  │
 group0            group1              group2
 unmapped       unrescued.pairs    group2_1_chunk{i}.fastq
 names.txt      (pairtools fmt)    group2_2_chunk{i}.fastq
-                                  chimeric_names.txt
-                                       |
-                                       ▼
-                          bowtie2 -k 100 --very-sensitive-local
-                          (pipe stdout → never written to disk)
-                                       |
-                                       ▼
-                             reattribute_reads()
-                             (multi-scale vectorised)
-                                       |
-                                       ▼
-                               predicted.pairs
+                     |            chimeric_names.txt
+                     ▼                 |
+             statistics_v2.py          ▼
+         P(s), trans P(s), coverage   bowtie2 -k 100 --very-sensitive-local
+         (density: TODO)              (pipe stdout → never written to disk)
+                     |                 |
+                     ▼                 |
+           plots/*.pdf (plots_v2.py)   |
+                     |                 |
+          ══ CHECKPOINT: check the ══  |
+          ══ laws, stop if wrong   ══  |
+                     |                 |
+                     └───────┬─────────┘
+                             ▼
+                     reattribute_reads()
+                     (multi-scale vectorised)
+                             |
+                             ▼
+                      predicted.pairs
 ```
+
+The statistical laws are plotted as soon as they are computed (before the
+re-attribution), so that a wrong signal (P(s), coverage, density) can be
+spotted and the run stopped before the costly re-attribution step.
 
 ---
 
-## Module 1: streaming_classifier.py
+## Module 1: streaming_classifier_v2.py
 
-**File:** `streaming_classifier.py` (root of the `v2` branch)
+**File:** `streaming_classifier_v2.py` (root of the `v2` branch)
 
 ### Key decisions
 
@@ -135,6 +146,22 @@ r2 flag=16 (reverse) : ref_end=30108134   → pos2 = 30108134
 distance = 52 bp  (correct fragment size)
 ```
 
+### Performance
+
+Fast path: only group2 pairs (~15%) go through the full `parse_sam_line()`
+(sequence, qualities, CIGAR tuples). group0/group1 lines are split once
+(tags kept unsplit), XS found by substring search, 5' position computed from
+POS + CIGAR reference length. Outputs strictly identical (byte-for-byte on yeast).
+
+| Dataset | Before | Fast path | RAM |
+|---------|--------|-----------|-----|
+| Yeast 10M pairs (36 bp) | 2 min 29 s | 1 min 11 s | 12 MB |
+| Human 500M pairs (150 bp), extrapolated | ~2-4 h | ~1-1.5 h | ~12 MB |
+
+Single core. Next step (pipeline level): split FASTQ into N chunks and stream
+`bowtie2 | classifier` per chunk → no SAM on disk (~450 GB for human) and
+time divided by N.
+
 ### Parallelisation
 
 Group2 FASTQ is split into `n_cpus` chunks at creation time (round-robin per pair).
@@ -144,7 +171,7 @@ Chunks are balanced by pairs (never split a pair across chunks).
 ### CLI usage
 
 ```bash
-python3 streaming_classifier.py \
+python3 streaming_classifier_v2.py \
     1.sam 2.sam ./output_dir \
     --n_cpus 20 \
     --min_chunk_bp 30 \
@@ -165,7 +192,66 @@ python3 streaming_classifier.py \
 
 ---
 
-## Module 2: statistics_human.py (TODO)
+## Module 2: statistics_v2.py (P(s) + coverage done, density TODO)
+
+**File:** `statistics_v2.py` — tests in `tests/test_statistics_v2.py`
+
+Single streaming pass over `unrescued.pairs` (pandas chunks + `np.bincount`).
+Yeast 7.7M pairs: 8 s, 0.8 GB RAM → human ~500M pairs estimated ~10 min.
+Output file names and normalisations identical to the previous version
+(`xs.npy`, `uncuts.npy`, `circles.npy`, `weirds.npy`, `trans_ps.npy`,
+`coverage1.npy`, `coverage.npy`) + raw counts of the 4 orientations in `ps_counts.npz`.
+Smoothing reuses `fitting_ps` / `mad_smoothing2` from `hicberg.utils` (temporary dependency).
+
+```bash
+python3 statistics_v2.py unrescued.pairs ./stats \
+    --chrom_sizes 1.sam          # @SQ header, or chrom.sizes / .fai
+    --circular plasmid2micron \
+    --bin_size 2000
+```
+
+The PDF plots of the laws are generated at the end in `./stats/plots/`
+(`--no_plots` to disable).
+
+**Conventions (must be reused by reattribute_reads):**
+- distance `d = |pos2 - pos1|` on the outer 5' positions of the pairs file
+  (`min(d, L - d)` on circular chromosomes), same `d` for building and lookup
+- coverage bin `= (pos - 1) // bin_size`
+- orientation defined after ordering reads by position (leftmost first)
+
+**Circular chromosomes (`--circular plasmid2micron,chrMT`):**
+- distance `d = min(|pos2 - pos1|, L - |pos2 - pos1|)` → `d ≤ L/2`
+- normalisation: a circle has `L` position pairs at every distance `d ≤ L/2`
+  (vs `L - d` for a linear chromosome) → area = `L × bin width`, 0 beyond `L/2`
+- if chrMT is not declared circular, its P(s) shows an artificial upturn
+  near `d ≈ L` (contacts across the origin of the linearised sequence)
+- previous version: same circular distance (`classify_reads()` overwrites
+  the bowtie2 `XG` tag with the chromosome length, used by `get_cis_distance()`),
+  but linear trapezoid areas → v1 vs v2 P(s) differ on circular chromosomes
+  by the ratio of the areas, increasingly with distance.
+
+**Yeast check:** beyond 5 kb, the 4 orientations are at 25.0% ± 0.1% each;
+below 1 kb, `+-` = 69% (dangling ends).
+
+**Validation vs v1 (yeast AC1 10M, 2026-11-12)** — plots in
+`/media/axel/EVO/data_for_v2/yeast/stats_v2/compare_v1/`:
+- group1: 7,709,374 (v2) vs 7,708,946 (v1) pairs; same `xs` bins
+- P(s), 16 linear chromosomes: median ratio v2/v1 = 1.000 for the 3 laws.
+  Median deviation < 0.2% beyond 1 kb, 0% at all distances for circles.
+- < 1 kb: distance convention. v1 used one formula per orientation + 1 when
+  building (but not at lookup); vs v2: uncut offset 2 bp, weird 1 bp,
+  circle 0 bp → large relative deviations only in the 1-bp-wide bins < 100 bp.
+- isolated ~10% jumps beyond 1 kb: **`fitting_ps` outlier detection**
+  (z-score > 1.5) flips points between versions although raw values agree
+  within ~1% → unstable smoothing, likely cause of the P(s) tail fluctuations
+  seen on reconstructed maps → to replace.
+- coverage: +0.006% reads; v1 counted reverse reads at `reference_start`
+  (v2: 5' end, which is also what v1 used at lookup) → median 0.5% per bin;
+  v1 has 1 extra empty bin on some chromosomes (`round(L/bin + 1)`).
+  Smoothed coverage: 45/6115 bins differ > 20%, all at chromosome ends with
+  0 reads (values extrapolated by `mad_smoothing2`) → mappability mask needed.
+- chrMT / plasmid2micron: median ratio 0.92-0.99, expected (circular
+  normalisation, v1 used linear trapezoids).
 
 ### P(s) — probability of contact vs genomic distance
 
@@ -184,15 +270,13 @@ Computed from `unrescued.pairs` (not BAM).
 P(s) must be computed on ALL pairs (artefacts included) so that the
 reconstructed group2 carries the same biases → filter AFTER reconstruction.
 
-**Distance calculation per orientation:**
-```python
-+/- : d = |r1.ref_start - r2.ref_end|          # fragment size
--/+ : d = |r1.ref_end - r2.ref_start|          # overlap (usually small)
-++  : d = |r1.ref_start - r2.ref_start|
---  : d = |r1.ref_end - r2.ref_end|
-```
-
-**Note:** `get_cis_distance()` in the current codebase is correct for all cases.
+**Distance calculation:**
+The previous version computed a different formula per orientation from BAM
+coordinates (`get_cis_distance()`). In v2, `pos` in the pairs file is already
+the outer 5' position of each read, so a single formula covers all cases:
+`d = |pos2 - pos1|`. It differs from the old one by at most ~2 bp (for `--` pairs,
+the old code used `reference_start` → differs by the difference of the two
+aligned lengths).
 Short distances are real biological artefacts (dangling ends, re-ligations),
 not calculation errors.
 
@@ -209,6 +293,24 @@ not calculation errors.
 - Strategy: `np.memmap` shared between workers to avoid RAM explosion
 - Computed by diagonal bands (intra-chromosomal contacts dominate)
 - LRU cache for repeated lookups on same bin pairs
+
+### Plots: plots_v2.py
+
+Multi-page PDFs (one page per chromosome) from any statistics folder (v1 or v2,
+same file names). `--compare_dir` overlays a reference folder (previous version).
+
+```bash
+python3 plots_v2.py ./stats                              # v2 only
+python3 plots_v2.py ./stats --compare_dir old/statistics # v2 vs v1
+```
+
+| File | Content |
+|------|---------|
+| `ps.pdf` | P(s) uncut / circle / weird, log-log (v1 as lines if compared) |
+| `ps_ratio.pdf` | P(s) ratio v2 / v1 per chromosome + summary page (median ratios) |
+| `orientations.pdf` | fraction of +-, -+, ++, -- vs distance (should reach 25% each) |
+| `coverage.pdf` | raw + smoothed coverage |
+| `trans_ps.pdf` | trans P(s) heatmap (+ scatter v2 vs v1) |
 
 ---
 
@@ -308,10 +410,14 @@ Commit convention:
 
 ## Open questions / TODO
 
-- [ ] Validate streaming_classifier.py on 10M yeast reads
+- [ ] Validate streaming_classifier_v2.py on 10M yeast reads
 - [ ] Decide bin size for coverage (keep 2kb or change?)
 - [ ] Decide P(s): 4 separate curves or 1 global + orientations as QC?
 - [ ] Handle multi-chunk reads (2 M blocks) → saved in multi_chunk.bam for later
 - [ ] Score gap threshold for XS: use AS-XS gap to reclassify some ambiguous as unique?
 - [ ] Benchmark reattribute_reads on chr21 before full human genome
+- [ ] Filter unmappable bins with theoretical mappability (GenMap, k = read length)
+      instead of Hi-C coverage → finer filtering, independent of contact density.
+      Was implemented in v1 locally (Nov 2026) but lost before being pushed → to redo in v2
+      (coverage + density map steps)
 

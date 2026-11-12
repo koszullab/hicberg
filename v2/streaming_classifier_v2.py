@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-streaming_classifier.py
+streaming_classifier_v2.py
 
 Classifies read pairs from two SAM files (bowtie2 --very-sensitive-local --reorder)
 into 3 groups:
@@ -158,6 +158,58 @@ def get_strand(read):
 
 
 # ---------------------------------------------------------------------------
+# Fast path (group0 / group1): minimal parsing
+# ---------------------------------------------------------------------------
+# Only ~15% of pairs (group2) need the full parse_sam_line() (sequence,
+# qualities, CIGAR tuples for chimera detection). For the others, the line is
+# split once (tags kept as a single string) and XS is found by substring search.
+
+_REF_CONSUMING = re.compile(r'(\d+)[MDN=X]')
+
+
+def split_sam(line):
+    """
+    Split a SAM alignment line into its 11 mandatory fields + the raw tag
+    string (not split). Returns None for header or malformed lines.
+    """
+    if line.startswith('@'):
+        return None
+    fields = line.rstrip('\n').split('\t', 11)
+    if len(fields) < 11:
+        return None
+    if len(fields) == 11:
+        fields.append('')
+    return fields
+
+
+def has_xs_tag(tags):
+    """XS tag present in the raw tag string (tags are tab-separated)."""
+    return tags.startswith('XS:') or '\tXS:' in tags
+
+
+def reference_length(cigar_str):
+    """Number of reference bases covered by the alignment (M/D/N/=/X)."""
+    if cigar_str[:-1].isdigit() and cigar_str[-1] == 'M':   # e.g. '36M'
+        return int(cigar_str[:-1])
+    return sum(int(n) for n in _REF_CONSUMING.findall(cigar_str))
+
+
+def fast_outer_5prime(fields, is_reverse):
+    """
+    Same as get_outer_5prime() from the raw fields:
+      forward : POS (already 1-based = reference_start + 1)
+      reverse : POS - 1 + reference length (= 0-based exclusive ref_end)
+    """
+    try:
+        pos = int(fields[3])
+    except ValueError:
+        pos = 1   # same fallback as parse_sam_line (ref_start = 0)
+    if is_reverse:
+        return pos - 1 + reference_length(fields[5])
+    return pos
+
+
+# ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
 
@@ -213,57 +265,53 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     # --- Stream both SAM files simultaneously ---
     with open(sam1_path) as fh1, open(sam2_path) as fh2:
 
-        iter1 = (parse_sam_line(l) for l in fh1)
-        iter2 = (parse_sam_line(l) for l in fh2)
+        # Alignment lines only (header / malformed lines skipped), as
+        # (raw line, split fields) — fields split once, tags left unsplit
+        def alignments(fh):
+            for line in fh:
+                fields = split_sam(line)
+                if fields is not None:
+                    yield line, fields
 
-        # Skip None (header lines)
-        def next_read(it):
-            r = None
-            while r is None:
-                r = next(it, 'EOF')
-                if r == 'EOF':
-                    return None
-                if r is None:
-                    continue
-            return r
+        iter1, iter2 = alignments(fh1), alignments(fh2)
 
         while True:
-            r1 = next_read(iter1)
-            r2 = next_read(iter2)
+            a1 = next(iter1, None)
+            a2 = next(iter2, None)
 
-            if r1 is None or r2 is None:
+            if a1 is None or a2 is None:
                 break
 
+            (line1, f1), (line2, f2) = a1, a2
+            flag1, flag2 = int(f1[1]), int(f2[1])
             stats['total_pairs'] += 1
 
             # ----------------------------------------------------------------
             # GROUP 0 — at least one unmapped
             # ----------------------------------------------------------------
-            if r1['is_unmapped'] or r2['is_unmapped']:
-                f_group0.write(r1['query_name'] + '\n')
+            if (flag1 & 4) or (flag2 & 4):
+                f_group0.write(f1[0] + '\n')
                 stats['group0'] += 1
                 continue
 
             # ----------------------------------------------------------------
             # GROUP 1 — both uniquely mapped (no XS)
             # ----------------------------------------------------------------
-            if not r1['has_xs'] and not r2['has_xs']:
-                pos1    = get_outer_5prime(r1)
-                pos2    = get_outer_5prime(r2)
-                strand1 = get_strand(r1)
-                strand2 = get_strand(r2)
+            if not has_xs_tag(f1[11]) and not has_xs_tag(f2[11]):
+                rev1, rev2 = bool(flag1 & 16), bool(flag2 & 16)
                 f_pairs.write(
-                    f"{r1['query_name']}\t"
-                    f"{r1['chrom']}\t{pos1}\t"
-                    f"{r2['chrom']}\t{pos2}\t"
-                    f"{strand1}\t{strand2}\n"
+                    f"{f1[0]}\t"
+                    f"{f1[2]}\t{fast_outer_5prime(f1, rev1)}\t"
+                    f"{f2[2]}\t{fast_outer_5prime(f2, rev2)}\t"
+                    f"{'-' if rev1 else '+'}\t{'-' if rev2 else '+'}\n"
                 )
                 stats['group1'] += 1
                 continue
 
             # ----------------------------------------------------------------
-            # GROUP 2 — at least one ambiguous (XS present)
+            # GROUP 2 — at least one ambiguous (XS present): full parsing
             # ----------------------------------------------------------------
+            r1, r2 = parse_sam_line(line1), parse_sam_line(line2)
             stats['group2'] += 1
             chunk_idx = stats['chunk_index'] % n_cpus
             stats['chunk_index'] += 1
