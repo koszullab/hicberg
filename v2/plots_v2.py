@@ -28,7 +28,7 @@ import numpy as np                                    # noqa: E402
 
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
-PS_COUNTS = "ps_counts.npz"
+PS_COUNTS, MAPPABILITY = "ps_counts.npz", "mappability.npy"
 
 # Same colours as hicberg/plot.py
 LAWS = (
@@ -98,7 +98,7 @@ def plot_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "reference"))
             title = f"P(s) — {chrom}" + (f"  (absent in {', '.join(missing)})" if missing else "")
             ax.set(xscale="log", yscale="log", title=title,
                    xlabel="Genomic distance (bp, log bins)",
-                   ylabel="Number of events / trapezoid area")
+                   ylabel="Number of events / number of position pairs")
             ax.grid(True, which="major", alpha=0.4)
             ax.legend(fontsize=8)
             pdf.savefig(fig)
@@ -220,9 +220,13 @@ def plot_orientations(stats_dir, output_pdf, min_pairs=50):
 
 def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
                   labels=("v2", "reference")):
-    """One page per chromosome: raw coverage (points) + smoothed (line)."""
+    """
+    One page per chromosome: raw coverage (points) + smoothed (line), and the
+    fraction of mappable positions per bin (right axis) if available.
+    """
     raw, smooth = load_dict(stats_dir, COVERAGE_RAW), load_dict(stats_dir, COVERAGE)
     smooth_ref = load_dict(compare_dir, COVERAGE) if compare_dir else None
+    mappability = load_dict(stats_dir, MAPPABILITY)
 
     with PdfPages(output_pdf) as pdf:
         for chrom in _chromosomes(smooth, smooth_ref):
@@ -239,7 +243,15 @@ def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
             ax.set(title=f"Coverage — {chrom} — bins of {bin_size} bp",
                    xlabel="Bin number", ylabel="Number of reads")
             ax.grid(True, alpha=0.4)
-            ax.legend(fontsize=8, markerscale=4)
+            handles, labels_ = ax.get_legend_handles_labels()
+            if mappability is not None and chrom in mappability:
+                ax2 = ax.twinx()
+                ax2.fill_between(np.arange(len(mappability[chrom])), mappability[chrom],
+                                 step="mid", color="grey", alpha=0.25, lw=0)
+                ax2.set(ylim=(0, 1.05), ylabel="Fraction of mappable positions")
+                handles.append(plt.Rectangle((0, 0), 1, 1, color="grey", alpha=0.25))
+                labels_.append("mappability")
+            ax.legend(handles, labels_, fontsize=8, markerscale=4)
             pdf.savefig(fig)
             plt.close(fig)
 

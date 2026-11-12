@@ -312,6 +312,38 @@ python3 plots_v2.py ./stats --compare_dir old/statistics # v2 vs v1
 | `coverage.pdf` | raw + smoothed coverage |
 | `trans_ps.pdf` | trans P(s) heatmap (+ scatter v2 vs v1) |
 
+### Mappability: mappability_v2.py (P(s) done, coverage/density TODO)
+
+```bash
+# once per genome and read length (yeast: 10 s, 100 MB RAM)
+python3 mappability_v2.py genome.fa ./mappability -K 35 -E 2 -T 8
+python3 statistics_v2.py unrescued.pairs ./stats ... \
+    --mappability ./mappability/genmap_K35_E2.bedgraph   # --map_resolution 100
+```
+
+- mask = per bin, **fraction of positions whose k-mer is unique**
+  (GenMap score ≥ `--min_mappability`, default 1). Not the mean score: a read
+  from a 2-copy position has an XS tag → group2 → never observed in group1.
+- P(s) area = number of pairs of mappable positions per distance bin =
+  autocorrelation of the mask (FFT, `--map_resolution` 100 bp; human chr1 →
+  2.5M points). Mask = 1 everywhere → exactly the trapezoids (tested).
+  `C[0] = Σ f` (a position paired with itself), circular autocorrelation
+  for circular chromosomes.
+- trans P(s): `contacts / (4 × mappable L1 × mappable L2)`
+- `mappability.npy`: mask at the coverage bin size (2 kb), plotted with the
+  coverage (grey, right axis)
+
+**Yeast AC1 (K=35, E=2): 91.6% of the genome mappable.**
+- P(s) level × 1.04 (chrXI) to × 1.40 (chrI): the trapezoid underestimated
+  the P(s) differently on each chromosome (chrI: small, large subtelomeric
+  repeats) → matters for re-attribution between chromosomes.
+- roughness of raw log P(s) beyond 100 kb (std of second differences):
+  0.131 → 0.064, Poisson counting noise = 0.053 → most chromosomes are now at
+  the noise floor (chrI 0.68 → 0.13, chrXVI 0.17 → 0.04). Still above: chrXII
+  (rDNA), chrX, chrXI, chrIII.
+- coverage: unmappable bins = coverage drops (subtelomeres); `mad_smoothing2`
+  extrapolates over them → next step.
+
 ---
 
 ## Module 3: reattribute_reads (TODO)
@@ -416,8 +448,11 @@ Commit convention:
 - [ ] Handle multi-chunk reads (2 M blocks) → saved in multi_chunk.bam for later
 - [ ] Score gap threshold for XS: use AS-XS gap to reclassify some ambiguous as unique?
 - [ ] Benchmark reattribute_reads on chr21 before full human genome
-- [ ] Filter unmappable bins with theoretical mappability (GenMap, k = read length)
-      instead of Hi-C coverage → finer filtering, independent of contact density.
-      Was implemented in v1 locally (Nov 2026) but lost before being pushed → to redo in v2
-      (coverage + density map steps)
+- [x] Theoretical mappability (GenMap) for the P(s) normalisation (mappability_v2.py)
+- [ ] Mappability for the coverage (correct by mask fraction, unmappable bins
+      interpolated?) and the density map (was implemented in v1 locally, Nov 2026,
+      lost before being pushed)
+- [ ] Replace `fitting_ps` (unstable outlier replacement); raw P(s) with
+      mappability are close to the Poisson noise → e.g. merge log bins until
+      enough pairs, or LOWESS weighted by counts, without point replacement
 

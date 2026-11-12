@@ -48,6 +48,7 @@ TRANS_PS       = "trans_ps.npy"
 COVERAGE_RAW   = "coverage1.npy"   # without smoothing
 COVERAGE       = "coverage.npy"    # smoothed
 PS_COUNTS      = "ps_counts.npz"   # raw counts, 4 orientations (QC)
+MAPPABILITY    = "mappability.npy" # fraction of mappable positions per coverage bin
 
 # Orientation codes (after ordering reads by position)
 ORIENTATIONS = ("+-", "-+", "++", "--")   # uncut, circle, weird, weird
@@ -276,19 +277,29 @@ def _quiet(func, *args, **kwargs):
         return func(*args, **kwargs)
 
 
-def compute_intra_ps(acc, smooth=True):
+def compute_intra_ps(acc, smooth=True, mappability=None, map_resolution=None):
     """
-    Normalise raw counts by the trapezoid areas (same as the previous
-    version): uncut and circle by the area, weird (++ and --) by 2 × area.
-    Circular chromosomes use the circular areas (laws are 0 beyond L/2).
+    Normalise raw counts by the number of position pairs per distance bin:
+    uncut and circle by the area, weird (++ and --) by 2 × area.
+      - default: trapezoid areas (same as the previous version); circular
+        chromosomes use the circular areas (laws are 0 beyond L/2)
+      - mappability = {chrom: fraction of mappable positions per bin of
+        map_resolution}: only pairs of mappable positions are counted
+        (mappability_v2.mappable_areas)
     """
     if smooth:
         from hicberg.utils import fitting_ps
+    if mappability is not None:
+        from mappability_v2 import mappable_areas
 
     uncuts, circles, weirds = {}, {}, {}
     for i, (chrom, counts) in enumerate(acc.ps_counts_by_chrom().items()):
         xs    = acc.xs[chrom]
-        areas = trapezoid_areas(xs, acc.sizes[i], circular=acc.circular[i])
+        if mappability is None:
+            areas = trapezoid_areas(xs, acc.sizes[i], circular=acc.circular[i])
+        else:
+            areas = mappable_areas(xs, acc.sizes[i], mappability[chrom], map_resolution,
+                                   circular=acc.circular[i])
 
         def norm(n, factor=1.0):
             return np.divide(n, areas * factor, out=np.zeros_like(areas), where=areas != 0)
@@ -310,16 +321,20 @@ def compute_intra_ps(acc, smooth=True):
     return uncuts, circles, weirds
 
 
-def compute_trans_ps(acc):
+def compute_trans_ps(acc, lengths=None):
     """
     Pseudo P(s) between two chromosomes: number of contacts / (L1 × L2 × 4),
     × 4 for the 4 read orientations. Symmetric: both (a, b) and (b, a) keys.
+    lengths: {chrom: length} to use instead of the chromosome sizes
+    (e.g. number of mappable positions).
     """
+    sizes = acc.sizes if lengths is None else np.array([lengths[c] for c in acc.names])
     counts = acc.trans.reshape(acc.n_chrom, acc.n_chrom)
     counts = counts + counts.T - np.diag(np.diag(counts))
     trans_ps = {}
     for (i, a), (j, b) in itertools.product(enumerate(acc.names), repeat=2):
-        trans_ps[(a, b)] = counts[i, j] / (float(acc.sizes[i]) * float(acc.sizes[j]) * 4)
+        area = float(sizes[i]) * float(sizes[j]) * 4
+        trans_ps[(a, b)] = counts[i, j] / area if area > 0 else 0.0
     return trans_ps
 
 
@@ -346,10 +361,15 @@ def compute_coverages(acc, smooth=True):
 
 def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         base=1.1, circular="", chunksize=5_000_000, smooth=True,
-                        plots=True):
+                        plots=True, mappability=None, map_resolution=100,
+                        min_mappability=1.0):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
+
+    mappability: GenMap bedgraph (mappability_v2.py). If given, the P(s)
+    areas and trans lengths only count mappable positions (fraction of
+    positions with score >= min_score, binned at map_resolution).
     """
     t0 = time.time()
     output_dir = Path(output_dir)
@@ -368,10 +388,24 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         acc.add(*chunk)
         print(f"  {acc.stats['pairs']:>13,} pairs  ({time.time() - t0:.0f} s)")
 
+    map_fine = map_lengths = map_coarse = None
+    if mappability is not None:
+        from mappability_v2 import read_bedgraph, binned_unique_fraction, mappable_length
+        print(f"Reading mappability {mappability} ...")
+        bg = read_bedgraph(mappability)
+        missing = [c for c in chrom_sizes if c not in bg]
+        if missing:
+            print(f"  [warning] chromosomes absent from the mappability file "
+                  f"(considered unmappable): {missing}")
+        map_fine   = binned_unique_fraction(bg, chrom_sizes, map_resolution, min_mappability)
+        map_coarse = binned_unique_fraction(bg, chrom_sizes, bin_size, min_mappability)
+        map_lengths = {c: mappable_length(map_fine[c], L, map_resolution)
+                       for c, L in chrom_sizes.items()}
+
     print("Computing intra P(s) ...")
-    uncuts, circles, weirds = compute_intra_ps(acc, smooth)
+    uncuts, circles, weirds = compute_intra_ps(acc, smooth, map_fine, map_resolution)
     print("Computing trans P(s) ...")
-    trans_ps = compute_trans_ps(acc)
+    trans_ps = compute_trans_ps(acc, map_lengths)
     print("Computing coverages ...")
     cov_raw, cov_smooth = compute_coverages(acc, smooth)
 
@@ -386,6 +420,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     np.savez_compressed(output_dir / PS_COUNTS,
                         orientations=np.array(ORIENTATIONS),
                         **{c: v for c, v in acc.ps_counts_by_chrom().items()})
+    if map_coarse is not None:
+        np.save(output_dir / MAPPABILITY, map_coarse)
 
     # --- Stats ---
     s = acc.stats
@@ -403,8 +439,17 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         f"log base              : {base}",
         f"circular              : {','.join(sorted(circular)) or '-'}",
         f"smoothing             : {smooth}",
-        f"time                  : {time.time() - t0:.0f} s",
     ]
+    if map_lengths is not None:
+        total, mappable = sum(chrom_sizes.values()), sum(map_lengths.values())
+        lines += [
+            f"mappability           : {mappability}",
+            f"  resolution / min    : {map_resolution} bp / score >= {min_mappability}",
+            f"  mappable genome     : {mappable:,.0f} / {total:,} bp ({100 * mappable / total:.1f}%)",
+        ]
+    else:
+        lines.append("mappability           : - (trapezoid areas)")
+    lines.append(f"time                  : {time.time() - t0:.0f} s")
     (output_dir / "statistics_stats.txt").write_text("\n".join(lines) + "\n")
     print("\n=== Statistics ===\n" + "\n".join(lines))
 
@@ -437,6 +482,13 @@ def main():
                         help="Save raw laws (no P(s) fit, no coverage smoothing)")
     parser.add_argument("--no_plots", action="store_true",
                         help="Do not generate the PDF plots (output_dir/plots)")
+    parser.add_argument("--mappability", default=None,
+                        help="GenMap bedgraph (mappability_v2.py): P(s) areas and trans "
+                             "lengths only count mappable positions")
+    parser.add_argument("--map_resolution", type=int, default=100,
+                        help="Resolution of the mappability mask for the P(s) areas (default=100)")
+    parser.add_argument("--min_mappability", type=float, default=1.0,
+                        help="Min GenMap score of a mappable position (default=1.0 = unique k-mer)")
     args = parser.parse_args()
 
     generate_statistics(
@@ -449,6 +501,9 @@ def main():
         chunksize        = args.chunksize,
         smooth           = not args.no_smoothing,
         plots            = not args.no_plots,
+        mappability      = args.mappability,
+        map_resolution   = args.map_resolution,
+        min_mappability  = args.min_mappability,
     )
 
 
