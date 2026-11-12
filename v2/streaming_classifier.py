@@ -145,10 +145,10 @@ def get_outer_5prime(read):
     """
     1-based outer-most 5' position following pairtools convention:
       forward (+) : reference_start + 1
-      reverse (-) : reference_end        (pysam ref_end is already exclusive → no +1)
+      reverse (-) : reference_end        (0-based exclusive = 1-based inclusive of last aligned base → no +1)
     """
     if read['is_reverse']:
-        return read['ref_end']          # already 1-based exclusive = last aligned bp
+        return read['ref_end']          # 0-based exclusive = 1-based position of last aligned base
     else:
         return read['ref_start'] + 1    # 0-based → 1-based
 

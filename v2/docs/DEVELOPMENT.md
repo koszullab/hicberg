@@ -25,7 +25,7 @@ This development branch targets **human genome scale** with:
 
 ---
 
-## Pipeline overview (new human-scale branch)
+## Pipeline overview (v2 branch)
 
 ```
 FASTQ_1  FASTQ_2
@@ -62,7 +62,7 @@ names.txt      (pairtools fmt)    group2_2_chunk{i}.fastq
 
 ## Module 1: streaming_classifier.py
 
-**File:** `hicberg_human/streaming_classifier.py`
+**File:** `streaming_classifier.py` (root of the `v2` branch)
 
 ### Key decisions
 
@@ -122,7 +122,7 @@ pair (r1, r2)
 **pairtools standard:**
 ```python
 forward (+) : pos = reference_start + 1   # 0-based → 1-based
-reverse (-) : pos = reference_end          # already 1-based exclusive in pysam
+reverse (-) : pos = reference_end          # 0-based exclusive in pysam = 1-based inclusive of last aligned base
 ```
 
 
@@ -293,7 +293,7 @@ tests/data/human/
 
 ```
 main branch          → current hicberg (untouched)
-human-scale branch   → this development
+v2 branch            → this development (human-scale)
 ```
 
 Commit convention:
