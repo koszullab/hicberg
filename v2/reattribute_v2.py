@@ -289,6 +289,22 @@ PAIRS_HEADER = ("## pairs format v1.0\n"
                 "#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2 n_candidates1 n_candidates2\n")
 
 
+def merge_pairs(unrescued, predicted, out_path):
+    """rescued.pairs = unrescued.pairs + predicted.pairs (7 standard columns). Returns the number of pairs."""
+    n = 0
+    with open(out_path, "w") as out:
+        out.write("## pairs format v1.0\n#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+        for path in (unrescued, predicted):
+            with open(path) as fh:
+                for line in fh:
+                    if line.startswith("#"):
+                        continue
+                    f = line.rstrip("\n").split("\t")
+                    out.write("\t".join(f[:7]) + "\n")
+                    n += 1
+    return n
+
+
 def reattribute_chunk(job):
     """
     Worker: one group2 chunk. job = dict(fastq1, fastq2 | sam1, sam2, out, stats_dir,
@@ -368,6 +384,11 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 for line in fh:
                     out.write(line)
             Path(j["out"]).unlink()
+
+    unrescued = Path(classifier_dir) / "unrescued.pairs" if classifier_dir else None
+    if unrescued is not None and unrescued.is_file():
+        n_res = merge_pairs(unrescued, output_dir / "predicted.pairs", output_dir / "rescued.pairs")
+        print(f"rescued.pairs: {n_res:,} pairs (unrescued + predicted)")
 
     total = {k: sum(r[k] for r in results) for k in results[0] if k != "seconds"}
     p = max(total["placed"], 1)

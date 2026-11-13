@@ -485,6 +485,74 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
             page(pdf, a, b)
 
 
+def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genome_bin=20000,
+                      regions=None, chromosomes=None, cmap="afmhot_r"):
+    """
+    Contact maps of several pairs files side by side (e.g. unrescued /
+    rescued v1 / rescued v2), log10(count + 1), one colour scale per page
+    shared by all the panels (0 → 99.5th percentile of the first map).
+      page 1     : whole genome at genome_bin
+      next pages : each chromosome (intra) at bin_size (chromosomes: subset)
+      last pages : regions = [(chrom, start_kb, end_kb), ...] at bin_size
+    pairs_files: [(label, path), ...]; chrom_sizes: {chrom: length}.
+    """
+    from scipy import sparse
+    import density_v2 as dn
+
+    names = list(chrom_sizes)
+    n_bins, offsets = dn.genome_bins(chrom_sizes, bin_size)
+    mats = [(lab, dn.contact_matrix(path, chrom_sizes, bin_size)) for lab, path in pairs_files]
+
+    # aggregation matrix bin_size → genome_bin, chromosome by chromosome
+    k = max(1, genome_bin // bin_size)
+    starts = np.concatenate([[0], np.cumsum([-(-n // k) for n in n_bins])[:-1]])
+    coarse = np.concatenate([starts[i] + np.arange(n) // k for i, n in enumerate(n_bins)])
+    agg = sparse.csr_matrix((np.ones(len(coarse)), (np.arange(len(coarse)), coarse)))
+
+    def show(pdf, title, blocks, extent, ticks=None):
+        logs = [np.log10(b + 1.0) for b in blocks]
+        vmax = np.percentile(logs[0], 99.5) or 1.0
+        fig, axes = plt.subplots(1, len(blocks), figsize=(6.2 * len(blocks), 6), squeeze=False)
+        for ax, (lab, _), z in zip(axes[0], mats, logs):
+            im = ax.imshow(z, cmap=cmap, vmin=0, vmax=vmax, interpolation="none", extent=extent)
+            ax.set_title(lab, fontsize=10)
+            if ticks:
+                ax.set_xticks(ticks[0], ticks[1], rotation=90, fontsize=6)
+                ax.set_yticks(ticks[0], ticks[1], fontsize=6)
+                for o in ticks[2]:
+                    ax.axhline(o, color="grey", lw=0.3)
+                    ax.axvline(o, color="grey", lw=0.3)
+            else:
+                ax.set(xlabel="kb", ylabel="kb")
+        fig.suptitle(title, fontsize=11)
+        fig.colorbar(im, ax=axes[0].tolist(), fraction=0.015, label="log10(contacts + 1)")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    with PdfPages(output_pdf) as pdf:
+        g = [(agg.T @ m @ agg).toarray() for _, m in mats]
+        ends = np.cumsum([-(-n // k) for n in n_bins])
+        mids = (np.concatenate([[0], ends[:-1]]) + ends) / 2
+        show(pdf, f"Whole genome — {genome_bin // 1000} kb bins", g,
+             (0, g[0].shape[1], g[0].shape[0], 0), (mids, names, ends[:-1]))
+        for i, c in enumerate(names):
+            if chromosomes is not None and c not in chromosomes:
+                continue
+            sl = slice(offsets[i], offsets[i] + n_bins[i])
+            blocks = [m[sl, sl].toarray() for _, m in mats]
+            L = chrom_sizes[c] / 1000
+            show(pdf, f"{c} — {bin_size // 1000} kb bins", blocks, (0, L, L, 0))
+        for c, lo, hi in (regions or []):
+            i = names.index(c)
+            b0, b1 = int(lo * 1000 // bin_size), int(-(-hi * 1000 // bin_size))
+            b1 = min(b1, n_bins[i])
+            sl = slice(offsets[i] + b0, offsets[i] + b1)
+            blocks = [m[sl, sl].toarray() for _, m in mats]
+            x0, x1 = b0 * bin_size / 1000, b1 * bin_size / 1000
+            show(pdf, f"{c} {lo}-{hi} kb — {bin_size // 1000} kb bins", blocks, (x0, x1, x1, x0))
+    return mats
+
+
 def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
              labels=("v2", "reference")):
     output_dir = Path(output_dir or stats_dir)
