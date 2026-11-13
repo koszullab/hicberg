@@ -253,6 +253,76 @@ below 1 kb, `+-` = 69% (dangling ends).
 - chrMT / plasmid2micron: median ratio 0.92-0.99, expected (circular
   normalisation, v1 used linear trapezoids).
 
+### P(s) smoothing: `pool` (default) replaces `fitting_ps`
+
+`fitting_ps` (LOWESS + replacement of points with |z-score| > 1.5 by the fit)
+is unstable (±10% jumps for tiny input changes, see validation) and even
+increases the roughness: beyond 100 kb, raw 0.084 → fitting_ps 0.094. It also
+replaces points with > 1000 pairs (up to 22%). Kept as `--ps_smoothing fitting_ps`
+to reproduce v1.
+
+`pool` (`pooled_law`, `smooth_ps_laws`) — no point is ever replaced by a fit:
+0. below `--ps_pool_distance` (1 kb, same limit as `fitting_ps` in v1): raw
+   values, zeros and fluctuations included. The law changes from one bp to
+   the next there and zeros are information (no ++/-- pair below 19 bp on
+   chrI, ~12 expected with a pooled plateau). A first version pooled these
+   bins → flat plateau giving a never-observed 10-bp configuration the same
+   weight as d ≈ 10 kb → fixed.
+1. beyond `--ps_merge_distance` (5 kb) the 4 orientations are equivalent
+   (25% each, check orientations.pdf) → one law for uncut/circle/weird from
+   all the pairs over 4 × area (4× more counts)
+2. consecutive distance bins pooled (short → long) until ≥ `--ps_min_pairs`
+   (100) pairs per group (Poisson error ≤ 10%); last incomplete group merged
+   back; a rich bin alone in its group keeps its exact raw value
+3. group values interpolated in log-log between group centres, then rescaled
+   (3 iterations) so that each group gets exactly its observed pairs
+   (Σ area × law = Σ counts). Without this, the group value (area-weighted
+   mean of a decaying law) is not the law at the group centre: +15% at 10 kb,
+   ×1.9 at 400 kb on simulated power laws. After: no bias (+1% ± 5% over 50 draws)
+4. ends: flat before the first group centre (short distances are not a power
+   law), log-log slope of the last segment beyond the last centre
+
+Yeast AC1 (with mappability), beyond 100 kb: roughness raw 0.084, fitting_ps
+0.094, **pool 0.049**; rich bins (≥ 1000 pairs) unchanged (0.0%).
+The tail of small chromosomes rises (last bin / P(s) at L/2: chrI ×3.4,
+chrIII ×3.3, chrXI ×2.4, most others ×1.0-1.5): present in the raw data, few
+pairs; could be telomere-telomere contacts (Rabl) → to check.
+
+### Is the trapezoid (position-pair) normalisation biased? (yeast AC1, 2026-11-13)
+
+The area = number of position pairs at distance d gives a probability per
+position pair, which is what is compared between candidates. It assumes all
+positions are equivalent; general form: area(d) = Σ_i w(i) w(i+d) (FFT, same
+code as the mappability mask). Two checks:
+
+1. **Coverage autocorrelation.** With propensity = P(s) × cov(i) × cov(j), the
+   consistent denominator is Σ cov(i) cov(i+d). Ratio current / coverage-weighted
+   (observed group1 coverage at 100 bp, CV 0.39 vs Poisson 0.09), normalised
+   on 10-100 kb: current P(s) overestimated by **6% at 100 bp, 5% at 200 bp,
+   1% at 500 bp, < 0.3% beyond 1 kb** (16 chromosomes, max 7%). Negligible
+   compared with the 5 orders of magnitude of the P(s) → keep the current
+   areas. To re-measure on human (CNV, GC: coverage varies at larger scales).
+2. **Restriction sites (DpnII + HinfI).** 22% of read 5' ends are within 5 bp
+   of a site (5.5% for random mappable positions, ×4), depleted at 5-30 bp.
+   Not soft-clipped junctions (0.8% soft-clipped) → reads truly starting at a
+   fragment end. But the enrichment is the **same in every pair category**
+   (uncut < 1 kb 24%, 1-10 kb 22%, > 10 kb 21%, trans 22%) and identical
+   between copies of a repeat (same sequence) → cancels in the P(s) shape
+   and in the comparison of candidates. The (slow) restriction-site-based
+   count of potential events is not needed. Its effect at short distances is
+   already included in check 1.
+3. **Very high P(s) at 1-3 bp (uncut +-)** come from the counts, not from the
+   normalisation: genome-wide 94 / 816 / **5314** pairs at d = 1 / 2 / 3 bp,
+   then ~5-15 per bp up to 30 bp. 99.3% of the d = 3 bp pairs sit on a
+   restriction site: both reads start at the two 5' ends of the same cut
+   site, offset by the overhang (DpnII 4 nt → d = 3; HinfI 3 nt → d = 2).
+   Real (artefactual) events; for a multi-mapping pair of this kind the d = 3
+   configuration has the same weight in every repeat copy → favours keeping
+   both reads in the same copy. Could also be filtered upstream.
+
+Scripts (one-off, not in the repo): `/media/axel/EVO/data_for_v2/yeast/analyses/`
+(`analyse_normalisation.py`, `analyse_sites_par_categorie.py`, `analyse_softclip.py`).
+
 ### P(s) — probability of contact vs genomic distance
 
 Computed from `unrescued.pairs` (not BAM).
@@ -470,7 +540,6 @@ Commit convention:
 - [ ] Mappability for the coverage (correct by mask fraction, unmappable bins
       interpolated?) and the density map (was implemented in v1 locally, Nov 2026,
       lost before being pushed)
-- [ ] Replace `fitting_ps` (unstable outlier replacement); raw P(s) with
-      mappability are close to the Poisson noise → e.g. merge log bins until
-      enough pairs, or LOWESS weighted by counts, without point replacement
+- [x] Replace `fitting_ps` (unstable outlier replacement) → `--ps_smoothing pool`
+      (default), see "P(s) smoothing" in Module 2
 

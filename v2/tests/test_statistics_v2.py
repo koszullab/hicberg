@@ -96,7 +96,7 @@ def test_trans_ps_symmetric(acc):
 
 
 def test_intra_ps_normalisation(acc):
-    uncuts, circles, weirds = st.compute_intra_ps(acc, smooth=False)
+    uncuts, circles, weirds = st.compute_intra_ps(acc, smoothing="none")
     areas = st.trapezoid_areas(acc.xs["chrA"], 10_000)
     i500, i2000 = st.attribute_xs(acc.xs["chrA"], 500), st.attribute_xs(acc.xs["chrA"], 2000)
     assert uncuts["chrA"][i500]   == pytest.approx(2 / areas[i500])
@@ -124,7 +124,7 @@ def test_circular_areas_cover_all_position_pairs():
 
 
 def test_intra_ps_circular_normalisation(acc):
-    uncuts, _, _ = st.compute_intra_ps(acc, smooth=False)
+    uncuts, _, _ = st.compute_intra_ps(acc, smoothing="none")
     areas = st.trapezoid_areas(acc.xs["circ"], 1_000, circular=True)
     i100 = st.attribute_xs(acc.xs["circ"], 100)
     assert uncuts["circ"][i100] == pytest.approx(1 / areas[i100])

@@ -280,7 +280,106 @@ def _quiet(func, *args, **kwargs):
         return func(*args, **kwargs)
 
 
-def compute_intra_ps(acc, smooth=True, mappability=None, map_resolution=None):
+def pooled_law(xs, counts, areas, n_min=100, d_max=None):
+    """
+    Law = counts / areas, with consecutive distance bins pooled (from short to
+    long distances) until each group holds >= n_min counts: group value =
+    sum(counts) / sum(areas), Poisson error <= 1/sqrt(n_min). The group values
+    are then interpolated in log-log at the area-weighted (log) centre of
+    each group → continuous curve (flat before the first centre, extended
+    with the log-log slope of the last segment beyond the last centre); a bin alone in its group
+    keeps its exact raw value. Bins with area 0 (circular, beyond L/2) stay 0.
+    No point is ever replaced by a fit.
+    """
+    xs = np.asarray(xs, dtype=np.float64)
+    counts = np.asarray(counts, dtype=np.float64)
+    areas = np.asarray(areas, dtype=np.float64)
+    law = np.zeros(len(xs))
+    idx = np.flatnonzero(areas > 0)
+    if len(idx) == 0:
+        return law
+
+    # bin centres (geometric) for the log-log interpolation
+    hi = np.append(xs[1:], d_max if d_max is not None else xs[-1] * 1.1)
+    centres = np.sqrt(np.maximum(xs, 0.5) * np.maximum(hi, 1.0))
+
+    # groups of consecutive bins with >= n_min counts (last one merged back)
+    groups, current, total = [], [], 0.0
+    for j in idx:
+        current.append(j)
+        total += counts[j]
+        if total >= n_min:
+            groups.append(current)
+            current, total = [], 0.0
+    if current:
+        if groups:
+            groups[-1].extend(current)
+        else:
+            groups.append(current)
+
+    values = np.array([counts[g].sum() / areas[g].sum() for g in groups])
+    g_centres = np.array([np.exp(np.average(np.log(centres[g]), weights=areas[g]))
+                          for g in groups])
+
+    if np.all(values > 0) and len(groups) > 1:
+        lx, gx, gy = np.log(centres[idx]), np.log(g_centres), np.log(values)
+        ly = np.interp(lx, gx, gy)
+        # beyond the last group centre: extend the log-log slope of the last
+        # segment (the law decays smoothly at long distances). Before the first
+        # centre: flat (short distances are not a power law: religations,
+        # overlapping reads)
+        sel = lx > gx[-1]
+        if sel.any() and gx[-1] > gx[-2]:
+            ly[sel] = gy[-1] + (gy[-1] - gy[-2]) / (gx[-1] - gx[-2]) * (lx[sel] - gx[-1])
+        law[idx] = np.exp(ly)
+
+        # The group value is an area-weighted mean of a law that varies inside
+        # the group, so it is not the law at the group centre (biased upwards
+        # for a decaying law). Re-scale the curve so that each group gets
+        # exactly its observed counts (sum of areas × law = sum of counts),
+        # with the correction factor interpolated (log-log) between groups.
+        for _ in range(3):
+            ratio = np.array([counts[g].sum() / np.sum(areas[g] * law[g]) for g in groups])
+            law[idx] *= np.exp(np.interp(lx, gx, np.log(ratio)))
+    else:   # empty groups: piecewise-constant values
+        for g, v in zip(groups, values):
+            law[g] = v
+    return law
+
+
+def smooth_ps_laws(xs, counts, areas, n_min=100, d_merge=5000, d_max=None, d_pool=1000):
+    """
+    The 3 P(s) laws (uncut, circle, weird) from the raw counts of the 4
+    orientations:
+      - d < d_pool: raw values, zeros and fluctuations included. At short
+        distances the law changes from one bp to the next (overlapping reads,
+        religations): pooling would spread a group mean over configurations
+        that are never observed (e.g. no ++/-- pair below 19 bp on chrI)
+      - d_pool <= d < d_merge: each law from its own counts (weird: ++ and --
+        over 2 × area), smoothed by pooled_law()
+      - d >= d_merge: the orientations are equivalent (25% each), so the 3 laws
+        share one estimate from all the counts over 4 × area (4× more counts)
+    """
+    xs = np.asarray(xs)
+    raw_zone, short = xs < d_pool, xs < d_merge
+    mid = short & ~raw_zone
+    out = {}
+    for key, n, factor in (("uncut", counts[UNCUT], 1.0),
+                           ("circle", counts[CIRCLE], 1.0),
+                           ("weird", counts[PLUS_PLUS] + counts[MINUS_MINUS], 2.0)):
+        a = areas * factor
+        raw = np.divide(n, a, out=np.zeros(len(xs)), where=a > 0)
+        pooled = pooled_law(xs, np.where(mid, n, 0), np.where(mid, a, 0), n_min, d_max)
+        out[key] = np.where(raw_zone, raw, pooled)
+    merged = pooled_law(xs, np.where(short, 0, counts.sum(axis=0)),
+                        np.where(short, 0, areas * 4.0), n_min, d_max)
+    for key in out:
+        out[key] = np.where(short, out[key], merged)
+    return out
+
+
+def compute_intra_ps(acc, smoothing="pool", mappability=None, map_resolution=None,
+                     n_min=100, d_merge=5000, d_pool=1000):
     """
     Normalise raw counts by the number of position pairs per distance bin:
     uncut and circle by the area, weird (++ and --) by 2 × area.
@@ -289,8 +388,11 @@ def compute_intra_ps(acc, smooth=True, mappability=None, map_resolution=None):
       - mappability = {chrom: fraction of mappable positions per bin of
         map_resolution}: only pairs of mappable positions are counted
         (mappability_v2.mappable_areas)
+    smoothing: "pool" (smooth_ps_laws), "fitting_ps" (previous version) or "none".
     """
-    if smooth:
+    if smoothing not in ("pool", "fitting_ps", "none"):
+        raise ValueError(f"Unknown P(s) smoothing: {smoothing}")
+    if smoothing == "fitting_ps":
         from hicberg.utils import fitting_ps
     if mappability is not None:
         from mappability_v2 import mappable_areas
@@ -312,7 +414,10 @@ def compute_intra_ps(acc, smooth=True, mappability=None, map_resolution=None):
             "circle": norm(counts[CIRCLE]),
             "weird":  norm(counts[PLUS_PLUS] + counts[MINUS_MINUS], factor=2.0),
         }
-        if smooth:
+        if smoothing == "pool":
+            d_max = acc.sizes[i] / 2 if acc.circular[i] else acc.sizes[i]
+            laws = smooth_ps_laws(xs, counts, areas, n_min, d_merge, d_max, d_pool)
+        elif smoothing == "fitting_ps":
             for key, y in laws.items():
                 try:
                     laws[key] = _quiet(fitting_ps, xs, y)
@@ -440,6 +545,8 @@ def compute_coverages(acc, smooth=True, mappability=None, **correction):
 
 def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         base=1.1, circular="", chunksize=5_000_000, smooth=True,
+                        ps_smoothing="pool", ps_min_pairs=100, ps_merge_distance=5000,
+                        ps_pool_distance=1000,
                         plots=True, mappability=None, map_resolution=100,
                         min_mappability=1.0, coverage_min_fraction=0.8,
                         coverage_min_bp=100, coverage_min_ratio=0.5):
@@ -483,7 +590,9 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                        for c, L in chrom_sizes.items()}
 
     print("Computing intra P(s) ...")
-    uncuts, circles, weirds = compute_intra_ps(acc, smooth, map_fine, map_resolution)
+    ps_smoothing = ps_smoothing if smooth else "none"
+    uncuts, circles, weirds = compute_intra_ps(acc, ps_smoothing, map_fine, map_resolution,
+                                               ps_min_pairs, ps_merge_distance, ps_pool_distance)
     print("Computing trans P(s) ...")
     trans_ps = compute_trans_ps(acc, map_lengths)
     print("Computing coverages ...")
@@ -522,7 +631,10 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         f"bin_size              : {bin_size}",
         f"log base              : {base}",
         f"circular              : {','.join(sorted(circular)) or '-'}",
-        f"smoothing             : {smooth}",
+        f"P(s) smoothing        : {ps_smoothing}"
+        + (f" (raw below {ps_pool_distance} bp, >= {ps_min_pairs} pairs per group beyond, "
+           f"orientations merged beyond {ps_merge_distance} bp)"
+           if ps_smoothing == "pool" else ""),
     ]
     if map_lengths is not None:
         total, mappable = sum(chrom_sizes.values()), sum(map_lengths.values())
@@ -564,6 +676,17 @@ def main():
                         help="Comma-separated circular chromosomes, e.g. plasmid2micron,chrMT")
     parser.add_argument("--chunksize", type=int,   default=5_000_000,
                         help="Pairs read per chunk (default=5,000,000)")
+    parser.add_argument("--ps_smoothing", choices=["pool", "fitting_ps"], default="pool",
+                        help="P(s) smoothing: pool = distance bins pooled until enough pairs, "
+                             "log-log interpolation; fitting_ps = previous version (default=pool)")
+    parser.add_argument("--ps_min_pairs", type=int, default=100,
+                        help="pool: min number of pairs per group of distance bins (default=100)")
+    parser.add_argument("--ps_pool_distance", type=int, default=1000,
+                        help="pool: raw P(s) values (no pooling) below this distance, where the "
+                             "law changes from one bp to the next (default=1000)")
+    parser.add_argument("--ps_merge_distance", type=int, default=5000,
+                        help="pool: beyond this distance the 4 orientations share one law "
+                             "(default=5000; check orientations.pdf)")
     parser.add_argument("--no_smoothing", action="store_true",
                         help="Save raw laws (no P(s) fit, no coverage smoothing)")
     parser.add_argument("--no_plots", action="store_true",
@@ -594,6 +717,10 @@ def main():
         circular         = args.circular,
         chunksize        = args.chunksize,
         smooth           = not args.no_smoothing,
+        ps_smoothing     = args.ps_smoothing,
+        ps_min_pairs     = args.ps_min_pairs,
+        ps_merge_distance = args.ps_merge_distance,
+        ps_pool_distance = args.ps_pool_distance,
         plots            = not args.no_plots,
         mappability      = args.mappability,
         map_resolution   = args.map_resolution,
