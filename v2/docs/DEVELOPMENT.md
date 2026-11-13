@@ -401,8 +401,9 @@ at 90 kb (v1 window). Noise on the arms (CV): 0.58 / 0.36 / 0.28 / 0.24 /
 structure).
 
 **Adaptive window** (`--smoothing adaptive`, default): for each pixel, the
-smallest window among 5/11/21/31/45 bins holding ≥ `--n_min` raw contacts
-(default **200**, ~7% Poisson error), nan-mean of obs / exp over it. Yeast:
+smallest window among 1/3/5/11/21/31/45 bins (2-90 kb; 1 and 3 added later, see
+below) holding ≥ `--n_min` raw contacts, nan-mean of obs / exp over it. Yeast
+(first version, windows 5-45):
 
 | smoothing | trans median | CEN-CEN | arm noise (CV) | window CEN / arms |
 |---|---|---|---|---|
@@ -425,7 +426,36 @@ part of the full map by Spearman-Brown 2r/(1+r)):
 | intra 100-400 kb | 0.49 (≈ 66%) | 0.54 (≈ 70%) |
 | trans | 0.45 (≈ 62%) | 0.84 (≈ 91%) |
 
-→ default n_min = 200: same centromere peak, fluctuations ~90% real.
+→ n_min = 200: same centromere peak, fluctuations ~90% real.
+
+**Threshold choice.**
+- A cross-validation criterion (density of one half predicts the counts of
+  the other, Poisson deviance) chose n_min 100 intra / 50 trans: sharper
+  (trans centromere ×24.6) but visibly noisier (only ~50% of the extra trans
+  fluctuations real) → rejected.
+- **`--density_n_min auto`** (`density_v2.reproducible_n_min`): smallest
+  n_min, separately intra and trans, whose fine fluctuations (log2 adaptive −
+  log2 45-bin window, on each of two random halves of the pairs, halves at
+  n_min / 2) are reproducible: part = 2r / (1 + r) ≥ `--density_reproducibility`
+  (default **0.8**); grid 25/50/100/150/200/300/400. Recomputed per dataset:
+  deeper data or stronger structure → lower threshold, finer maps.
+  Yeast (intra pixels ≥ 3 bins from the diagonal):
+
+  | n_min | 100 | 150 | 200 | 300 | 400 |
+  |---|---|---|---|---|---|
+  | intra | 71% | 76% | 79.5% | **85%** | 88% |
+  | trans | 62% | 79% | **91%** | 97% | 98% |
+
+  → intra 300, trans 200. Without `auto`: 200 / 200
+  (`--density_n_min`, `--density_n_min_trans`). Cost of `auto` on yeast:
+  whole statistics step 153 s, 3.6 GB RAM (65 s without). Human: calibrate on
+  a subset of chromosomes (step 3). The intra value is dominated by the far
+  pixels (most numerous); a per-distance-band threshold would be possible.
+- **Windows of 1 and 3 bins** added: the window is already chosen pixel by
+  pixel, and near the diagonal 1-3 bins hold enough contacts (chrIV,
+  n_min 200: 3×3 enough for 95% of pixels at 2-4 kb, 92% at 4-10 kb, 46% at
+  10-20 kb; 1×1 for 30% at 2-4 kb) → 2-6 kb resolution along the diagonal,
+  unchanged beyond ~20 kb.
 Intra (v1 almost flat, 5-95%: 0.93-1.07): the adaptive map shows the Rabl
 X pattern centred on each centromere, the rDNA separation on chrXII and
 local structure near the diagonal (correlation with the raw obs / exp 0.31-0.41
@@ -452,13 +482,16 @@ python3 density_v2.py unrescued.pairs ./density --chrom_sizes 1.sam \
 `plots_v2.plot_density()` → `density.pdf` (genome log2 map + zooms, side by side).
 
 **In the pipeline:** `statistics_v2.py` now computes the density by default
-(unbiased, adaptive n_min 200, mappability mask and weights when
-`--mappability` is given; `--no_density`, `--density_n_min`), saves
+(unbiased, adaptive window, n_min 200 / 200 or `auto`, mappability mask and
+weights when `--mappability` is given; `--no_density`, `--density_n_min`,
+`--density_n_min_trans`, `--density_reproducibility`), saves
 `density_map.npy` and `contacts.npz` (contact matrix at bin_size, upper
 triangle), and the checkpoint plots include, for each chromosome
 (`density_intra.pdf`) and each pair of chromosomes (`density_trans.pdf`, ≤ 200
-pairs), the raw obs / exp at 2 kb (not smoothed, same mask and weights) next to
-the density. Grey = excluded bins, darkest blue = zero contact. Yeast: whole
+pairs), the raw obs / exp (not smoothed, same mask and weights; 2 kb intra,
+sum obs / sum exp over 5×5 bins = 10 kb in trans where 2-kb pixels hold 0 or 1
+contact; log2 ±3) next to the density (log2 ±1.5), real proportions, axes in
+kb, one colour bar each. Grey = excluded bins, darkest blue = zero contact. Yeast: whole
 statistics step with density and plots 65 s, 1.6 GB RAM. Human: contacts.npz
 and per-pair pages to rethink with the banded storage (step 3).
 

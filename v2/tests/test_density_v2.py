@@ -162,3 +162,55 @@ def test_bin_weights(tmp_path):
     p = tmp_path / "mappability.npy"
     np.save(p, {"chrA": np.array([1.0, 0.5, 0.8])})
     np.testing.assert_allclose(dn.bin_weights(p, {"chrA": 450}, 200), [1.0, 0.5, 0.8 * 50 / 200])
+
+
+def test_obs_exp_binned():
+    rng = np.random.default_rng(3)
+    t = rng.poisson(0.13, (40, 60)).astype(float)          # sparse trans block
+    t[5, :] = np.nan                                         # excluded bin
+    b = dn.obs_exp_binned(t, False, k=5)
+    assert b.shape == (8, 12)
+    # sum obs / sum exp: the mean over blocks weighted by expected is exactly 1
+    exp, defined = dn.expected_unbiased(t, False)
+    np.testing.assert_allclose(np.nansum(b * dn.block_sum(exp, 5)) / exp.sum(), 1.0)
+    np.testing.assert_allclose(dn.obs_exp_binned(t, False, k=1), dn.obs_exp_unbiased(t, False),
+                               equal_nan=True)
+
+
+def test_contact_matrix_split_halves_sum_to_full(tmp_path):
+    pairs = tmp_path / "x.pairs"
+    rng = np.random.default_rng(4)
+    lines = ["## pairs format v1.0"]
+    for k in range(500):
+        c1, c2 = rng.choice(["chrA", "chrB"], 2)
+        lines.append(f"r{k}\t{c1}\t{rng.integers(1, 1000)}\t{c2}\t{rng.integers(1, 1000)}\t+\t-")
+    pairs.write_text("\n".join(lines) + "\n")
+    sizes = {"chrA": 1000, "chrB": 1000}
+    full, (h0, h1) = dn.contact_matrix(pairs, sizes, 100, split_halves=True)
+    assert (full != dn.contact_matrix(pairs, sizes, 100)).nnz == 0
+    assert (full != h0 + h1).nnz == 0
+    assert 0.35 < h0.sum() / full.sum() < 0.65
+
+
+def test_reproducible_n_min_on_pure_noise_and_structure():
+    from scipy import sparse
+    rng = np.random.default_rng(5)
+
+    def halves_from(rate):
+        out = []
+        for _ in range(2):
+            u = sparse.triu(sparse.csr_matrix(rng.poisson(rate).astype(np.int64)))
+            out.append((u + u.T - sparse.diags(u.diagonal())).tocsr())
+        return out
+
+    sizes = {"chrA": 6000, "chrB": 6000}
+    # flat rate: fluctuations are pure noise → never reproducible → largest threshold
+    best, part = dn.reproducible_n_min(halves_from(np.full((120, 120), 0.5)), sizes, 100,
+                                       grid=(10, 50, 400))
+    assert best == {"intra": 400, "trans": 400}
+    # strong fine structure (checkerboard of 10-bin patches): reproducible at small thresholds
+    rate = np.full((120, 120), 2.0)
+    blocks = (np.add.outer(np.arange(120) // 10, np.arange(120) // 10) % 2).astype(bool)
+    rate[blocks] = 20.0
+    best, part = dn.reproducible_n_min(halves_from(rate), sizes, 100, grid=(10, 50, 400), target=0.8)
+    assert best["trans"] < 400 and part["trans"][10] > 0.8

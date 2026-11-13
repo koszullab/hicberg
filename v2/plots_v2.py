@@ -402,12 +402,17 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
             plt.close(fig)
 
 
-def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=200, vlim=1.5):
+def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=200,
+                          vlim=1.5, vlim_raw=3.0, raw_bin_intra=1, raw_bin_trans=5):
     """
     One page per chromosome (density_intra.pdf) and per pair of chromosomes
-    (density_trans.pdf, at most max_trans_pairs), with 2 matrices side by side:
-    the raw obs / exp at bin_size (not smoothed, same mask and mappable-length
-    weights as the density) and the density used by the re-attribution.
+    (density_trans.pdf, at most max_trans_pairs), with 2 matrices side by side,
+    real proportions, axes in kb, one colour bar each:
+      - raw obs / exp (not smoothed, same mask and mappable-length weights as
+        the density), aggregated over raw_bin × raw_bin bins (sum obs / sum
+        exp): 1 (2 kb) in intra, 5 (10 kb) in trans where 2-kb pixels hold
+        0 or 1 contact; log2 range ±vlim_raw
+      - the density used by the re-attribution; log2 range ±vlim
     Needs density_map.npy and contacts.npz (statistics_v2.py).
     """
     import itertools
@@ -436,31 +441,35 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
         else:
             weights[c] = None
 
-    def raw_obs_exp(a, b):
+    def raw_obs_exp(a, b, k):
         blk = matrix[offsets[a]:offsets[a] + n_bins[a], offsets[b]:offsets[b] + n_bins[b]]
         blk = blk.toarray().astype(np.float64)
         blk[bad[a], :] = np.nan
         blk[:, bad[b]] = np.nan
-        return dn.obs_exp_unbiased(blk, a == b, weights[a], weights[b])
+        return dn.obs_exp_binned(blk, a == b, weights[a], weights[b], k)
 
     cmap = plt.get_cmap("RdBu_r").copy()
     cmap.set_bad("lightgrey")
     kb = bin_size / 1000
 
     def page(pdf, a, b):
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5.8))
-        for ax, (lab, mat) in zip(axes, [(f"raw obs / exp {kb:g} kb (not smoothed)", raw_obs_exp(a, b)),
-                                         ("density (unbiased, adaptive window)", density[(a, b)])]):
+        k = raw_bin_intra if a == b else raw_bin_trans
+        extent = (0, sizes[b] / 1e3, sizes[a] / 1e3, 0)          # axes in kb
+        panels = [(f"raw obs / exp {kb * k:g} kb (not smoothed)", raw_obs_exp(a, b, k), vlim_raw),
+                  (f"density (unbiased, adaptive window), {kb:g} kb", density[(a, b)], vlim)]
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6.2))
+        for ax, (lab, mat, lim) in zip(axes, panels):
             with np.errstate(divide="ignore", invalid="ignore"):
                 z = np.log2(mat)
-            z[mat == 0] = -vlim          # zero contact: darkest blue (grey = excluded bins only)
-            im = ax.imshow(z, cmap=cmap, vmin=-vlim, vmax=vlim,
-                           interpolation="none", aspect="auto" if a != b else "equal")
+            z[mat == 0] = -lim           # zero contact: darkest blue (grey = excluded bins only)
+            im = ax.imshow(z, cmap=cmap, vmin=-lim, vmax=lim, interpolation="none",
+                           extent=extent, aspect="equal")
             ax.set_title(lab, fontsize=9)
-            ax.set(xlabel=f"{b} bin ({kb:g} kb)", ylabel=f"{a} bin ({kb:g} kb)")
+            ax.set(xlabel=f"{b} (kb)", ylabel=f"{a} (kb)")
+            fig.colorbar(im, ax=ax, fraction=0.046 * min(1.0, sizes[a] / sizes[b]), pad=0.03,
+                         label="log2")
         title = a if a == b else f"{a} × {b}"
-        fig.suptitle(f"{title} — log2 (grey = excluded bins, darkest blue = 0 contact)", fontsize=11)
-        fig.colorbar(im, ax=axes.tolist(), fraction=0.02, label="log2")
+        fig.suptitle(f"{title} — grey = excluded bins, darkest blue = 0 contact", fontsize=11)
         pdf.savefig(fig)
         plt.close(fig)
 
