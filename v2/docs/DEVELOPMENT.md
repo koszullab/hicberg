@@ -434,8 +434,18 @@ Square textures = shape of the box windows around isolated high pixels
 (not the filled bad bins); Gaussian windows would round them (optional). Maps also show the isolation of the rDNA
 (chrXII) in trans (low density band), hidden by the inflated v1 background.
 
+**Mappable-length weights** (`--mappability stats/mappability.npy`):
+expected(i, j) = E_d × w_i × w_j with w = mappable length / bin_size, E_d =
+Σ obs / Σ w_i w_j on each diagonal (trans: on the block). Same logic as the
+P(s) areas and the coverage. End of chrI: the last bin (490 bp, 431 bp
+mappable) had obs / exp 0.14 only because of its size, and pulled the fill
+of the 26-kb unmappable subtelomere down to 0.77; with the weights the end
+stays at 0.95-0.97. Elsewhere: median |Δ log2| 0.009 (99%: 0.08), CEN-CEN
+×16.3. w = 1 → identical to the unweighted computation (tested).
+
 ```bash
 python3 density_v2.py unrescued.pairs ./density --chrom_sizes 1.sam \
+    --mappability ./stats/mappability.npy \
     --coverage_kept ./stats/coverage_kept.npy      # unbiased + adaptive (default)
 # v1: --method v1 --smoothing fixed --bad_bins_cooler unrescued.pairs.cool
 ```

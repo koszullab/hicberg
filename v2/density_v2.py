@@ -119,25 +119,38 @@ def detrend_intra(mat, max_val=10):
     return out
 
 
-def obs_exp_unbiased(mat, intra):
+def obs_exp_unbiased(mat, intra, w_row=None, w_col=None):
     """
     Observed / expected with the zeros kept as information:
-      intra: expected = mean of each diagonal over the defined (non-NaN)
-             pixels, zeros included; trans: expected = block mean, zeros included.
+      intra: expected(i, j) = E_d × w_i × w_j, E_d = sum of each diagonal /
+             sum of w_i w_j over its defined (non-NaN) pixels, zeros included;
+      trans: expected(i, j) = E × w_i × w_j, E = block sum / sum of w_i w_j.
+    w = mappable length of each bin / bin_size (default 1): a short last bin
+    or a partially mappable bin is not seen as depleted (end of chrI: one
+    490-bp bin had obs / exp 0.14 only because of its size).
     Pixels whose expected is 0 (no contact at all) → NaN (filled later).
-    The mean of the result is 1 on each diagonal / block, whatever the sparsity.
+    With w = 1 the mean of the result is 1 on each diagonal / block.
     """
+    w_row = np.ones(mat.shape[0]) if w_row is None else np.asarray(w_row, dtype=np.float64)
+    w_col = np.ones(mat.shape[1]) if w_col is None else np.asarray(w_col, dtype=np.float64)
+    W = np.outer(w_row, w_col)
+    defined = np.isfinite(mat) & (W > 0)
     if not intra:
-        mean = np.nanmean(mat) if np.isfinite(mat).any() else 0.0
-        return mat / mean if mean > 0 else np.full(mat.shape, np.nan)
+        total_w = W[defined].sum()
+        e = mat[defined].sum() / total_w if total_w > 0 else 0.0
+        if e <= 0:
+            return np.full(mat.shape, np.nan)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = mat / (e * W)
+        out[~defined] = np.nan
+        return out
     n = mat.shape[0]
     rows, cols = np.indices(mat.shape)
     dist = np.abs(rows - cols)
-    defined = np.isfinite(mat)
     sums = np.bincount(dist[defined], weights=mat[defined], minlength=n)
-    counts = np.bincount(dist[defined], minlength=n)
-    expected = np.divide(sums, counts, out=np.zeros(n), where=counts > 0)
-    exp_px = expected[dist]
+    wsum = np.bincount(dist[defined], weights=W[defined], minlength=n)
+    expected = np.divide(sums, wsum, out=np.zeros(n), where=wsum > 0)
+    exp_px = expected[dist] * W
     with np.errstate(divide="ignore", invalid="ignore"):
         out = np.where(exp_px > 0, mat / exp_px, np.nan)
     out[~defined] = np.nan
@@ -167,7 +180,8 @@ def adaptive_filter(z, counts, windows=(5, 11, 21, 31, 45), n_min=200):
 
 
 def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1",
-                  smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200):
+                  smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200,
+                  w_row=None, w_col=None):
     """
     Density map of one chromosome pair (mat: counts with NaN on bad bins).
     method "v1": previous version (expected from the positive values only,
@@ -179,7 +193,7 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     mat = mat.astype(np.float64)
     counts = mat.copy()
     if method == "unbiased":
-        mat = obs_exp_unbiased(mat, intra)
+        mat = obs_exp_unbiased(mat, intra, w_row, w_col)
     elif method == "v1":
         if intra:
             mat = detrend_intra(mat, max_val)
@@ -212,12 +226,13 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
 
 def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
                  patch_small=15, patch_large=45, max_val=10, method="v1",
-                 smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200):
+                 smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200, weights=None):
     """
     {(chrom_a, chrom_b): density} for every pair of chromosomes (a <= b in
     the chromosome order, as v1). bad_bins: boolean array over the genome bins
     (True = excluded row / column), e.g. from the cooler balancing (v1) or
-    from the mappability.
+    from the mappability. weights: mappable length / bin_size of each genome
+    bin (bin_weights), used by the unbiased obs / exp.
     """
     names = list(chrom_sizes)
     n_bins, offsets = genome_bins(chrom_sizes, bin_size)
@@ -234,8 +249,27 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
             mat[:, bad_b | bad_a.all()] = np.nan
         out[(a, b)] = block_density(mat, intra=(a == b), patch_small=patch_small,
                                     patch_large=patch_large, max_val=max_val, method=method,
-                                    smoothing=smoothing, windows=windows, n_min=n_min)
+                                    smoothing=smoothing, windows=windows, n_min=n_min,
+                                    w_row=None if weights is None else weights[ra],
+                                    w_col=None if weights is None else weights[rb])
     return out
+
+
+def bin_weights(mappability_path, chrom_sizes, bin_size):
+    """
+    Mappable length / bin_size of each genome bin, from statistics_v2's
+    mappability.npy (fraction of mappable positions per bin) and the
+    effective width of each bin (the last bin of a chromosome is shorter).
+    """
+    frac = np.load(mappability_path, allow_pickle=True).item()
+    out = []
+    for c, L in chrom_sizes.items():
+        n = -(-L // bin_size)
+        f = np.zeros(n)
+        f[:min(n, len(frac[c]))] = frac[c][:n]
+        widths = np.clip(L - np.arange(n) * bin_size, 0, bin_size)
+        out.append(f * widths / bin_size)
+    return np.concatenate(out)
 
 
 def kept_bad_bins(kept_path, chrom_sizes, bin_size):
@@ -268,6 +302,10 @@ def main():
                              "fixed: patch_large × patch_large (v1)")
     parser.add_argument("--n_min", type=int, default=200,
                         help="adaptive: min contacts per window (default=200, ~7%% noise; fine fluctuations ~90%% reproducible on yeast)")
+    parser.add_argument("--mappability", default=None,
+                        help="statistics_v2 mappability.npy: the expected of each pixel uses the "
+                             "mappable length of its two bins (short / partially mappable bins "
+                             "are not seen as depleted)")
     mask = parser.add_mutually_exclusive_group()
     mask.add_argument("--coverage_kept", default=None,
                       help="Bad bins = bins excluded from the coverage (statistics_v2.py "
@@ -288,7 +326,9 @@ def main():
     else:
         bad = None
     maps = density_maps(matrix, sizes, args.bin_size, bad, args.patch_small, args.patch_large,
-                        method=args.method, smoothing=args.smoothing, n_min=args.n_min)
+                        method=args.method, smoothing=args.smoothing, n_min=args.n_min,
+                        weights=bin_weights(args.mappability, sizes, args.bin_size)
+                        if args.mappability else None)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     np.save(out / DENSITY_MAP, maps)

@@ -133,3 +133,32 @@ def test_adaptive_density_unbiased_peak():
     adapt = dn.block_density(mat, intra=False, method="unbiased", smoothing="adaptive")
     assert np.median(adapt) == pytest.approx(np.median(fixed), abs=0.15)   # neutral background kept
     assert adapt[75, 100] > 2 * fixed[75, 100]                              # sharper peak
+
+
+def test_weights_one_change_nothing():
+    rng = np.random.default_rng(2)
+    mat = rng.poisson(2.0, (30, 30)).astype(float)
+    mat = np.triu(mat) + np.triu(mat, 1).T
+    np.testing.assert_allclose(dn.obs_exp_unbiased(mat, True, np.ones(30), np.ones(30)),
+                               dn.obs_exp_unbiased(mat, True), equal_nan=True)
+    t = rng.poisson(0.5, (10, 20)).astype(float)
+    np.testing.assert_allclose(dn.obs_exp_unbiased(t, False, np.ones(10), np.ones(20)),
+                               dn.obs_exp_unbiased(t, False), equal_nan=True)
+
+
+def test_short_last_bin_not_depleted_with_weights():
+    # uniform contact rate per bp; last bin only 25% wide → its counts are ×0.25
+    w = np.r_[np.ones(39), 0.25]
+    mat = 40.0 * np.outer(w, w)
+    plain = dn.obs_exp_unbiased(mat, True)
+    weighted = dn.obs_exp_unbiased(mat, True, w, w)
+    assert plain[10, 39] < 0.5                      # seen as depleted without weights
+    np.testing.assert_allclose(weighted, 1.0)       # neutral with weights
+    t = 10.0 * np.outer(np.ones(8), w)
+    np.testing.assert_allclose(dn.obs_exp_unbiased(t, False, np.ones(8), w), 1.0)
+
+
+def test_bin_weights(tmp_path):
+    p = tmp_path / "mappability.npy"
+    np.save(p, {"chrA": np.array([1.0, 0.5, 0.8])})
+    np.testing.assert_allclose(dn.bin_weights(p, {"chrA": 450}, 200), [1.0, 0.5, 0.8 * 50 / 200])
