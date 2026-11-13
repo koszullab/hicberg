@@ -350,6 +350,36 @@ aligned lengths).
 Short distances are real biological artefacts (dangling ends, re-ligations),
 not calculation errors.
 
+### Density map: density_v2.py (step 1 done: v1 reproduced)
+
+v1 (`get_local_density`, per chromosome pair, 2 kb, from the **unbalanced**
+cooler): bad bins of the balancing → NaN; intra: obs / mean of the *positive*
+values of each diagonal (≥ 10 → 1); trans: obs / block mean; zeros → 1;
+NaN filled by nan-mean 15×15 (5 iterations); nan-mean 45×45; diagonal → 1.
+
+v2: same algorithm, from the pairs file, with nan-mean windows computed as
+`uniform_filter(values) / uniform_filter(defined)` (identical to v1's
+`generic_filter` + Python callback, tested; O(1) per pixel).
+- contact matrix built from v1's `unrescued.pairs` = v1 cooler, pixel by
+  pixel (bin = (pos - 1) // bin_size, as `cooler cload pairs`)
+- density with v1's mask: **identical to v1's density_map.npy** (max abs
+  difference 1.3e-14 over the 171 blocks), **1.8 s** vs ~2 min (8 cores)
+
+**Bias found in v1 (yeast AC1):** intra density is almost flat (5-95%:
+0.93-1.07), but **trans median = 1.84**. Cause: zeros → 1 is not neutral on
+sparse blocks. ~87% of trans pixels are 0 at 2 kb; after obs / mean the
+non-zero pixels average 1 / 0.13 ≈ 7.5, so replacing zeros by 1 gives a mean
+≈ 1 + 0.87. In mode `full` (P(s) × density) trans candidates are favoured
+~×1.8 over intra ones, and the factor depends on the sparsity (depth,
+resolution): close to ×2 for human at 2 kb. Intra avoids it only because the
+expected is the mean of the positive values (zeros excluded), which in turn
+erases real depletions.
+
+Next (step 2), each change measured separately: mask from the mappability
+(`coverage_kept.npy`) instead of the balancing; unbiased obs / exp (zeros
+kept as 0, expected including zeros). Step 3: human scale (banded intra at
+fine resolution, coarse trans).
+
 ### Coverage (smoothed 1D)
 
 - Computed per chromosome from group1 alignments
