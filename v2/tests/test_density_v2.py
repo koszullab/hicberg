@@ -111,3 +111,25 @@ def test_block_density_neutral_on_uniform_matrix():
     np.testing.assert_allclose(d, 1.0)
     d = dn.block_density(np.full((10, 20), 5.0), intra=False, patch_small=3, patch_large=5)
     np.testing.assert_allclose(d, 1.0)
+
+
+def test_adaptive_filter_small_window_where_dense():
+    counts = np.full((100, 100), 0.1)          # sparse background
+    counts[45:55, 45:55] = 20.0                # dense peak (like CEN-CEN)
+    z = counts / counts.mean()
+    out, chosen = dn.adaptive_filter(z, counts, windows=(5, 11, 21, 45), n_min=100)
+    assert chosen[50, 50] == 5                 # 25 px × 20 ≥ 100
+    assert chosen[5, 5] == 45                  # background never reaches 100 → largest
+    fixed = dn.nanmean_filter(z, 45)
+    assert out[50, 50] > 3 * fixed[50, 50]     # the peak is not diluted
+
+
+def test_adaptive_density_unbiased_peak():
+    rng = np.random.default_rng(0)
+    lam = np.full((150, 200), 0.13)
+    lam[70:80, 95:105] = 3.0                   # centromere-like enrichment
+    mat = rng.poisson(lam).astype(float)
+    fixed = dn.block_density(mat, intra=False, method="unbiased", smoothing="fixed")
+    adapt = dn.block_density(mat, intra=False, method="unbiased", smoothing="adaptive")
+    assert np.median(adapt) == pytest.approx(np.median(fixed), abs=0.15)   # neutral background kept
+    assert adapt[75, 100] > 2 * fixed[75, 100]                              # sharper peak

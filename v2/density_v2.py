@@ -144,14 +144,40 @@ def obs_exp_unbiased(mat, intra):
     return out
 
 
-def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1"):
+def adaptive_filter(z, counts, windows=(5, 11, 21, 31, 45), n_min=200):
+    """
+    For each pixel, nan-mean of z over the smallest window (in `windows`) that
+    holds >= n_min raw contacts (Poisson error <= 1/sqrt(n_min)); the largest
+    window where none does. Sharp where contacts are dense (centromeres,
+    near the diagonal), wide on sparse regions (arms in trans).
+    Returns (smoothed, chosen window size per pixel).
+    """
+    c = np.where(np.isfinite(counts), counts, 0.0)
+    out = np.full(z.shape, np.nan)
+    chosen = np.zeros(z.shape, dtype=np.int32)
+    todo = np.ones(z.shape, dtype=bool)
+    for k, w in enumerate(windows):
+        enough = uniform_filter(c, size=w, mode="mirror") * w * w >= n_min
+        sel = todo & (enough | (k == len(windows) - 1))
+        if sel.any():
+            out[sel] = nanmean_filter(z, w)[sel]
+            chosen[sel] = w
+            todo &= ~sel
+    return out, chosen
+
+
+def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1",
+                  smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200):
     """
     Density map of one chromosome pair (mat: counts with NaN on bad bins).
     method "v1": previous version (expected from the positive values only,
     values >= max_val → 1, zeros → 1: biased upwards on sparse blocks,
     trans median 1.84 on yeast). "unbiased": obs_exp_unbiased(), zeros kept.
+    smoothing "fixed": nan-mean over patch_large × patch_large (v1);
+    "adaptive": adaptive_filter(windows, n_min).
     """
     mat = mat.astype(np.float64)
+    counts = mat.copy()
     if method == "unbiased":
         mat = obs_exp_unbiased(mat, intra)
     elif method == "v1":
@@ -165,7 +191,12 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
         raise ValueError(f"Unknown density method: {method}")
 
     filled = iterative_fill(mat, patch_small, max_iter=5)
-    smooth = nanmean_filter(filled, patch_large)
+    if smoothing == "fixed":
+        smooth = nanmean_filter(filled, patch_large)
+    elif smoothing == "adaptive":
+        smooth, _ = adaptive_filter(filled, counts, windows, n_min)
+    else:
+        raise ValueError(f"Unknown density smoothing: {smoothing}")
 
     nonzero = smooth[(smooth != 0) & np.isfinite(smooth)]
     if len(nonzero):
@@ -180,7 +211,8 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
 # ---------------------------------------------------------------------------
 
 def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
-                 patch_small=15, patch_large=45, max_val=10, method="v1"):
+                 patch_small=15, patch_large=45, max_val=10, method="v1",
+                 smoothing="fixed", windows=(5, 11, 21, 31, 45), n_min=200):
     """
     {(chrom_a, chrom_b): density} for every pair of chromosomes (a <= b in
     the chromosome order, as v1). bad_bins: boolean array over the genome bins
@@ -201,8 +233,16 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
             mat[bad_a | bad_b.all(), :] = np.nan
             mat[:, bad_b | bad_a.all()] = np.nan
         out[(a, b)] = block_density(mat, intra=(a == b), patch_small=patch_small,
-                                    patch_large=patch_large, max_val=max_val, method=method)
+                                    patch_large=patch_large, max_val=max_val, method=method,
+                                    smoothing=smoothing, windows=windows, n_min=n_min)
     return out
+
+
+def kept_bad_bins(kept_path, chrom_sizes, bin_size):
+    """Bad bins = coverage bins excluded by statistics_v2 (coverage_kept.npy, mappability)."""
+    kept = np.load(kept_path, allow_pickle=True).item()
+    n_bins, _ = genome_bins(chrom_sizes, bin_size)
+    return np.concatenate([~kept[c][:n] for c, n in zip(chrom_sizes, n_bins)])
 
 
 def cooler_bad_bins(cool_path):
@@ -220,8 +260,20 @@ def main():
     parser.add_argument("--bin_size", type=int, default=2000)
     parser.add_argument("--patch_small", type=int, default=15)
     parser.add_argument("--patch_large", type=int, default=45)
-    parser.add_argument("--bad_bins_cooler", default=None,
-                        help="Take the bad bins from the balancing of this cooler (v1)")
+    parser.add_argument("--method", choices=["unbiased", "v1"], default="unbiased",
+                        help="unbiased: zeros kept, expected including zeros (default); "
+                             "v1: previous version (zeros → 1, trans biased upwards)")
+    parser.add_argument("--smoothing", choices=["adaptive", "fixed"], default="adaptive",
+                        help="adaptive: smallest window with >= n_min contacts (default); "
+                             "fixed: patch_large × patch_large (v1)")
+    parser.add_argument("--n_min", type=int, default=200,
+                        help="adaptive: min contacts per window (default=200, ~7%% noise; fine fluctuations ~90%% reproducible on yeast)")
+    mask = parser.add_mutually_exclusive_group()
+    mask.add_argument("--coverage_kept", default=None,
+                      help="Bad bins = bins excluded from the coverage (statistics_v2.py "
+                           "coverage_kept.npy, mappability)")
+    mask.add_argument("--bad_bins_cooler", default=None,
+                      help="Bad bins from the balancing of this cooler (v1)")
     args = parser.parse_args()
 
     t0 = time.time()
@@ -229,8 +281,14 @@ def main():
     matrix = contact_matrix(args.pairs, sizes, args.bin_size)
     print(f"Contact matrix: {matrix.shape[0]} bins, {matrix.sum() // 2:,} contacts "
           f"(off-diagonal counted twice) ({time.time() - t0:.0f} s)")
-    bad = cooler_bad_bins(args.bad_bins_cooler) if args.bad_bins_cooler else None
-    maps = density_maps(matrix, sizes, args.bin_size, bad, args.patch_small, args.patch_large)
+    if args.coverage_kept:
+        bad = kept_bad_bins(args.coverage_kept, sizes, args.bin_size)
+    elif args.bad_bins_cooler:
+        bad = cooler_bad_bins(args.bad_bins_cooler)
+    else:
+        bad = None
+    maps = density_maps(matrix, sizes, args.bin_size, bad, args.patch_small, args.patch_large,
+                        method=args.method, smoothing=args.smoothing, n_min=args.n_min)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     np.save(out / DENSITY_MAP, maps)

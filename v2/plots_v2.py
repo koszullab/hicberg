@@ -11,6 +11,7 @@ a second folder (e.g. the previous hicberg version) to compare both:
   ps_ratio.pdf      ratio P(s) v2 / reference per chromosome   (with --compare_dir)
   coverage.pdf      raw + smoothed coverage per chromosome
   trans_ps.pdf      trans P(s) heatmap (+ scatter v2 vs reference)
+  density.pdf       log2 density map, genome + zooms (if density_map.npy)
   orientations.pdf  fraction of each orientation vs distance  (v2 only, ps_counts.npz)
 
 One page per chromosome in each PDF.
@@ -28,6 +29,7 @@ import numpy as np                                    # noqa: E402
 
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
+DENSITY = "density_map.npy"
 PS_COUNTS, MAPPABILITY, COVERAGE_KEPT = "ps_counts.npz", "mappability.npy", "coverage_kept.npy"
 
 # Same colours as hicberg/plot.py
@@ -321,6 +323,83 @@ def plot_trans_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "refere
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Density maps
+# ---------------------------------------------------------------------------
+
+def _genome_density(density):
+    """Assemble the {(a, b): block} density map into one genome-wide matrix."""
+    names = [a for a, b in density if a == b]
+    sizes = [density[(c, c)].shape[0] for c in names]
+    offsets = np.concatenate([[0], np.cumsum(sizes)])
+    g = np.full((offsets[-1], offsets[-1]), np.nan)
+    for (a, b), blk in density.items():
+        i, j = names.index(a), names.index(b)
+        g[offsets[i]:offsets[i + 1], offsets[j]:offsets[j + 1]] = blk
+        g[offsets[j]:offsets[j + 1], offsets[i]:offsets[i + 1]] = blk.T
+    return g, names, offsets
+
+
+def _downsample(g, factor):
+    """nan-mean over factor × factor blocks."""
+    if factor <= 1:
+        return g
+    n = -(-g.shape[0] // factor) * factor
+    p = np.full((n, n), np.nan)
+    p[:g.shape[0], :g.shape[1]] = g
+    with np.errstate(invalid="ignore"), np.testing.suppress_warnings() as sup:
+        sup.filter(RuntimeWarning)
+        return np.nanmean(p.reshape(n // factor, factor, n // factor, factor), axis=(1, 3))
+
+
+def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
+    """
+    maps: [(label, density_map.npy path), ...] shown side by side.
+    Page 1: genome-wide log2(density) (red = more contacts than expected);
+    next pages: zoom on chromosome pairs (default: the first 3 trans pairs).
+    """
+    loaded = [(lab, np.load(p, allow_pickle=True).item()) for lab, p in maps]
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("lightgrey")
+
+    def show(ax, mat, title, ticks=None):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            im = ax.imshow(np.log2(mat), cmap=cmap, vmin=-vlim, vmax=vlim, interpolation="none")
+        ax.set_title(title, fontsize=9)
+        if ticks:
+            pos, lab = ticks
+            ax.set_xticks(pos, lab, rotation=90, fontsize=6)
+            ax.set_yticks(pos, lab, fontsize=6)
+        return im
+
+    with PdfPages(output_pdf) as pdf:
+        fig, axes = plt.subplots(1, len(loaded), figsize=(7 * len(loaded), 7), squeeze=False)
+        for ax, (lab, d) in zip(axes[0], loaded):
+            g, names, offsets = _genome_density(d)
+            factor = -(-g.shape[0] // max_pixels)
+            im = show(ax, _downsample(g, factor), f"{lab} — log2 density (genome)",
+                      ((offsets[:-1] + offsets[1:]) / 2 / factor, names))
+            for o in offsets[1:-1] / factor:
+                ax.axhline(o - 0.5, color="black", lw=0.3)
+                ax.axvline(o - 0.5, color="black", lw=0.3)
+        fig.colorbar(im, ax=axes[0].tolist(), fraction=0.02, label="log2 density")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        first = loaded[0][1]
+        if zoom_pairs is None:
+            zoom_pairs = [k for k in first if k[0] != k[1]][:3]
+        for pair in zoom_pairs:
+            fig, axes = plt.subplots(1, len(loaded), figsize=(6 * len(loaded), 5), squeeze=False)
+            for ax, (lab, d) in zip(axes[0], loaded):
+                if pair in d:
+                    im = show(ax, d[pair], f"{lab} — {pair[0]} × {pair[1]}")
+                    ax.set(xlabel=f"{pair[1]} bin", ylabel=f"{pair[0]} bin")
+            fig.colorbar(im, ax=axes[0].tolist(), fraction=0.02, label="log2 density")
+            pdf.savefig(fig)
+            plt.close(fig)
+
+
 def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
              labels=("v2", "reference")):
     output_dir = Path(output_dir or stats_dir)
@@ -338,6 +417,12 @@ def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
     done.append("coverage.pdf")
     plot_trans_ps(stats_dir, output_dir / "trans_ps.pdf", compare_dir, labels)
     done.append("trans_ps.pdf")
+    if (Path(stats_dir) / DENSITY).is_file():
+        maps = [(labels[0], Path(stats_dir) / DENSITY)]
+        if compare_dir and (Path(compare_dir) / DENSITY).is_file():
+            maps.append((labels[1], Path(compare_dir) / DENSITY))
+        plot_density(maps, output_dir / "density.pdf")
+        done.append("density.pdf")
 
     print(f"Plots saved in {output_dir}: {', '.join(done)}")
     if compare_dir:

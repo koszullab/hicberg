@@ -398,8 +398,48 @@ trans background and the raw centromere contrast. Smoothing window
 sharp: ×24.8 at 10 kb, ×16.7 at 22 kb, ×10.0 at 42 kb, ×7.2 at 62 kb, ×5.1
 at 90 kb (v1 window). Noise on the arms (CV): 0.58 / 0.36 / 0.28 / 0.24 /
 0.22, Poisson part 0.53 / 0.24 / 0.13 / 0.09 / 0.06 (the rest is real
-structure). → idea: adaptive window (smallest one with ≥ N contacts), sharp
-near centromeres / diagonal, wide on sparse arms.
+structure).
+
+**Adaptive window** (`--smoothing adaptive`, default): for each pixel, the
+smallest window among 5/11/21/31/45 bins holding ≥ `--n_min` raw contacts
+(default **200**, ~7% Poisson error), nan-mean of obs / exp over it. Yeast:
+
+| smoothing | trans median | CEN-CEN | arm noise (CV) | window CEN / arms |
+|---|---|---|---|---|
+| fixed 45 | 0.95 | ×5.1 | 0.22 | 90 kb / 90 kb |
+| adaptive n_min=50 | 0.95 | ×24.8 | 0.25 | 10 kb / 42 kb |
+| adaptive n_min=100 | 0.95 | ×16.9 | 0.23 | 22 kb / 62 kb |
+| **adaptive n_min=200** | 0.95 | **×16.5** | 0.22 | 22 kb / 90 kb |
+
+Centromere peak 3.3× sharper (= raw ×17.1 at 22 kb) with the same arm noise;
+4.3 s for the genome.
+
+Are the fine fluctuations real? Split-half test: pairs split at random in two
+halves, fluctuations = log2 adaptive − log2 fixed 45 computed on each half
+(same windows as the full map), correlation between halves (→ reproducible
+part of the full map by Spearman-Brown 2r/(1+r)):
+
+| zone | n_min=100 | n_min=200 (default) |
+|---|---|---|
+| intra 6-100 kb | 0.78 (≈ 88%) | 0.83 (≈ 91%) |
+| intra 100-400 kb | 0.49 (≈ 66%) | 0.54 (≈ 70%) |
+| trans | 0.45 (≈ 62%) | 0.84 (≈ 91%) |
+
+→ default n_min = 200: same centromere peak, fluctuations ~90% real.
+Intra (v1 almost flat, 5-95%: 0.93-1.07): the adaptive map shows the Rabl
+X pattern centred on each centromere, the rDNA separation on chrXII and
+local structure near the diagonal (correlation with the raw obs / exp 0.31-0.41
+vs 0.20-0.22 for v1). Yeast has no real TAD at 2 kb: domains to check on human.
+Square textures = shape of the box windows around isolated high pixels
+(not the filled bad bins); Gaussian windows would round them (optional). Maps also show the isolation of the rDNA
+(chrXII) in trans (low density band), hidden by the inflated v1 background.
+
+```bash
+python3 density_v2.py unrescued.pairs ./density --chrom_sizes 1.sam \
+    --coverage_kept ./stats/coverage_kept.npy      # unbiased + adaptive (default)
+# v1: --method v1 --smoothing fixed --bad_bins_cooler unrescued.pairs.cool
+```
+`plots_v2.plot_density()` → `density.pdf` (genome log2 map + zooms, side by side).
 
 Coverage: low-coverage mappable bins are now **kept** by default
 (`--coverage_min_ratio 0`): a low coverage can be real (e.g. few restriction
