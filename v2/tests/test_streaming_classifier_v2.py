@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -54,3 +55,24 @@ def test_reference_length():
     assert sc.reference_length("60M2D40M3I47M") == 149
     assert sc.reference_length("50M1000N100M") == 1150
     assert sc.reference_length("70=1X79=") == 150
+
+
+def test_all_reads_coverage_counts_5prime_of_mapped_reads(tmp_path):
+    cov = sc.AllReadsCoverage({"chr1": 1050}, resolution=100)
+    for flag, pos, cigar in [(0, 1, "150M"),        # forward, 5' = 1     → bin 0
+                             (16, 1, "150M"),       # reverse, 5' = 150   → bin 1
+                             (0, 1001, "50M"),      # forward, 5' = 1001  → bin 10 (last, 50 bp wide)
+                             (4, 500, "*")]:        # unmapped → ignored
+        cov.add(sc.split_sam(sam_line(flag, pos, cigar, ["XS:i:5"])), flag)
+    path = tmp_path / "cov.npz"
+    cov.save(path)
+    z = np.load(path)
+    assert int(z["resolution"]) == 100 and len(z["chr1"]) == 11
+    assert z["chr1"].tolist() == [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+
+
+def test_sam_chrom_sizes(tmp_path):
+    sam = tmp_path / "x.sam"
+    sam.write_text("@HD\tVN:1.0\n@SQ\tSN:chrI\tLN:230490\n@SQ\tSN:chrII\tLN:822297\n"
+                   + sam_line(0, 1, "150M", []))
+    assert sc.sam_chrom_sizes(sam) == {"chrI": 230490, "chrII": 822297}

@@ -181,9 +181,26 @@ def test_correct_coverage_isolated_low_bin_after_gap():
     # like the end of chrI: 10 good bins, unmappable stretch, one low last bin
     raw = np.r_[np.full(10, 2000.), np.zeros(5), 800.]
     f = np.r_[np.ones(10), np.zeros(5), 1.]
-    cov, valid = st.correct_coverage(raw, f, 16 * 2000, 2000)
+    cov, valid = st.correct_coverage(raw, f, 16 * 2000, 2000, min_ratio=0.5)
     assert not valid[15]                                          # compared to real neighbours
     np.testing.assert_allclose(cov[10:], 2000)                    # constant beyond the last kept bin
+
+
+def test_correct_coverage_short_end_bin_is_not_an_anchor():
+    # end of chrI: 10 good bins, 5 unmappable bins, last bin 490 bp wide and low
+    raw = np.r_[np.full(10, 2000.), np.zeros(5), 200.]
+    f = np.r_[np.ones(10), np.zeros(5), 1.]
+    cov, valid = st.correct_coverage(raw, f, 15 * 2000 + 490, 2000)
+    assert valid[15]                                              # its own value is kept...
+    assert cov[15] == pytest.approx(200 * 2000 / 490)
+    np.testing.assert_allclose(cov[10:15], 2000)                  # ...but it does not pull the gap down
+
+
+def test_correct_coverage_keeps_low_coverage_mappable_bins_by_default():
+    # a mappable bin with a low coverage (e.g. few restriction sites) is real data
+    raw = np.r_[np.full(10, 2000.), 300., np.full(10, 2000.)]
+    cov, valid = st.correct_coverage(raw, np.ones(21), 21 * 2000, 2000)
+    assert valid.all() and cov[10] == 300
 
 
 def test_correct_coverage_longer_than_mask_and_empty():
@@ -200,3 +217,24 @@ def test_load_chrom_sizes_from_sam_header(tmp_path):
     sam.write_text("@HD\tVN:1.0\n@SQ\tSN:chrI\tLN:230490\n@SQ\tSN:chrII\tLN:822297\n"
                    "@PG\tID:bowtie2\nread\t4\t*\t0\t0\t*\t*\t0\t0\tACGT\tIIII\n")
     assert st.load_chrom_sizes(sam) == {"chrI": 230490, "chrII": 822297}
+
+
+def test_rebin_counts():
+    np.testing.assert_array_equal(st.rebin_counts(np.arange(7), 100, 200, 4), [1, 5, 9, 6])
+    with pytest.raises(ValueError):
+        st.rebin_counts(np.arange(7), 100, 250, 3)
+
+
+def test_fill_from_all_reads(tmp_path):
+    from types import SimpleNamespace
+    # chrA: 6 bins of 200 bp, bins 2-3 unmappable (excluded), last bin 100 bp wide
+    acc = SimpleNamespace(names=["chrA"], sizes=np.array([1100]), bin_size=200)
+    final = {"chrA": np.array([100., 100., 999., 999., 100., 100.])}
+    kept = {"chrA": np.array([True, True, False, False, True, True])}
+    mapp = {"chrA": np.array([1., 1., 0., 0., 1., 1.])}
+    # all aligned reads at 100 bp: 2× the group1 level, more reads in the repeat
+    z = tmp_path / "all.npz"
+    np.savez(z, resolution=100, chrA=np.array([100, 100, 100, 100, 150, 150, 0, 0, 100, 100, 100]))
+    out = st.fill_from_all_reads(acc, final, kept, mapp, z)["chrA"]
+    # scale = median(100 / 200) = 0.5 → bin 2: 0.5 × 300, bin 3: 0 (no read at all)
+    np.testing.assert_allclose(out, [100, 100, 150, 0, 100, 100])

@@ -447,7 +447,8 @@ def compute_trans_ps(acc, lengths=None):
 
 
 def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.8,
-                     min_mappable_bp=100, min_ratio=0.5, window=10, circular=False):
+                     min_mappable_bp=100, min_ratio=0.0, window=10, circular=False,
+                     min_anchor_bp=None):
     """
     Coverage corrected by mappability, expressed per bin_size bp:
       1. mappable length of each bin = fraction × effective width (the last
@@ -456,11 +457,17 @@ def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.8,
          at least min_mappable_bp mappable positions (guard against tiny
          remnants, e.g. 20 bp with 1 read × 100);
          corrected = raw × bin_size / mappable length
-      3. low outliers: valid bins below min_ratio × the median of the
-         corrected coverage of the `window` closest valid bins on each side are excluded too (truly
-         under-covered bins, repeats seen by bowtie2 but not by GenMap)
+      3. optional (min_ratio > 0, off by default): low outliers, i.e. valid
+         bins below min_ratio × the median of the corrected coverage of the
+         `window` closest valid bins on each side, are excluded too. Off by
+         default: a mappable bin with a low coverage can be real (e.g. few
+         restriction sites) and must be reconstructed faithfully.
       4. excluded bins: linear interpolation between the closest valid bins
-         (periodic on circular chromosomes, constant beyond the ends)
+         (periodic on circular chromosomes, constant beyond the ends). Only
+         bins with >= min_anchor_bp mappable bp (default bin_size / 2) are
+         used as anchors: a short valid bin at a chromosome end keeps its own
+         value but does not impose its slope on the bins upstream (end of
+         chrI: one 490-bp bin was pulling 26 kb of interpolated coverage down)
     Returns (corrected, valid) with valid = bins kept (not interpolated). If no
     bin is valid, corrected is NaN everywhere (to be filled by the caller).
     """
@@ -488,19 +495,64 @@ def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.8,
         corrected[low] = np.nan
 
     if valid.any() and not valid.all():
+        anchors = valid & (mappable >= (bin_size / 2 if min_anchor_bp is None else min_anchor_bp))
+        if not anchors.any():
+            anchors = valid
         idx = np.arange(len(raw))
-        corrected[~valid] = np.interp(idx[~valid], idx[valid], corrected[valid],
+        corrected[~valid] = np.interp(idx[~valid], idx[anchors], corrected[anchors],
                                       period=len(raw) if circular else None)
     return corrected, valid
 
 
-def compute_coverages(acc, smooth=True, mappability=None, **correction):
+def rebin_counts(counts, resolution, bin_size, n_bins):
+    """Sum counts binned at `resolution` into bins of bin_size (multiple of it)."""
+    if bin_size % resolution:
+        raise ValueError(f"bin_size {bin_size} is not a multiple of {resolution}")
+    k = bin_size // resolution
+    padded = np.zeros(n_bins * k)
+    m = min(len(counts), len(padded))
+    padded[:m] = counts[:m]
+    return padded.reshape(n_bins, k).sum(axis=1)
+
+
+def fill_from_all_reads(acc, final, kept, mappability, all_reads):
+    """
+    Option: excluded (unmappable) bins get the coverage of ALL aligned reads
+    (ambiguous ones at bowtie2's random best position, streaming_classifier_v2
+    --coverage_all_reads), scaled to the group1 level by the genome-wide median
+    ratio group1 / all reads over fully mappable full-width bins, and expressed
+    per bin_size (short last bins). Bins without any read stay 0.
+    """
+    z = np.load(all_reads)
+    res = int(z["resolution"])
+    totals, ratios = {}, []
+    for i, chrom in enumerate(acc.names):
+        n = len(final[chrom])
+        t = rebin_counts(z[chrom], res, acc.bin_size, n) if chrom in z.files else np.zeros(n)
+        widths = np.clip(acc.sizes[i] - np.arange(n) * acc.bin_size, 0, acc.bin_size)
+        totals[chrom] = (t, widths)
+        f = np.zeros(n)
+        f[:min(n, len(mappability[chrom]))] = mappability[chrom][:n]
+        ref = kept[chrom] & (f >= 0.99) & (widths == acc.bin_size) & (t > 0)
+        ratios.append(final[chrom][ref] / t[ref])
+    scale = float(np.median(np.concatenate(ratios)))
+    for chrom in acc.names:
+        t, widths = totals[chrom]
+        out = ~kept[chrom] & (widths > 0)
+        final[chrom][out] = scale * t[out] * acc.bin_size / widths[out]
+    print(f"  excluded bins filled from all aligned reads (scale group1 / all = {scale:.3f})")
+    return final
+
+
+def compute_coverages(acc, smooth=True, mappability=None, all_reads=None, **correction):
     """
     Returns (raw, final, kept) coverages per chromosome.
       - mappability = {chrom: fraction of mappable positions per coverage
         bin}: final = correct_coverage(**correction) (no other smoothing),
-        kept = bins used (not interpolated). Chromosomes without any kept bin
-        get the genome-wide median.
+        kept = bins used (not interpolated). Excluded bins: interpolated
+        (default) or, with all_reads (coverage_all_reads.npz), estimated from
+        all aligned reads (fill_from_all_reads). Chromosomes without any kept
+        bin get the genome-wide median.
       - otherwise: final = mad_smoothing2 (previous version), or raw if not
         smooth; kept = None.
     """
@@ -514,6 +566,9 @@ def compute_coverages(acc, smooth=True, mappability=None, **correction):
                 circular=acc.circular[i], **correction)
             if not kept[chrom].any():
                 empty.append(chrom)
+        if all_reads is not None:
+            final = fill_from_all_reads(acc, final, kept, mappability, all_reads)
+            empty = []
         if empty:
             median = np.median(np.concatenate([v[np.isfinite(v)] for v in final.values()]))
             for chrom in empty:
@@ -521,7 +576,9 @@ def compute_coverages(acc, smooth=True, mappability=None, **correction):
             print(f"  [warning] no kept bin on {empty}: genome-wide median coverage used")
         total = sum(len(v) for v in raw.values())
         n_out = sum(int((~v).sum()) for v in kept.values())
-        print(f"  {n_out} / {total} coverage bins excluded (unmappable or low outliers) → interpolated")
+        print(f"  {n_out} / {total} coverage bins excluded (unmappable"
+              f"{' or low outliers' if correction.get('min_ratio', 0) > 0 else ''})"
+              f" → {'all aligned reads' if all_reads is not None else 'interpolated'}")
         return raw, final, kept
 
     if not smooth:
@@ -549,7 +606,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         ps_pool_distance=1000,
                         plots=True, mappability=None, map_resolution=100,
                         min_mappability=1.0, coverage_min_fraction=0.8,
-                        coverage_min_bp=100, coverage_min_ratio=0.5):
+                        coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -567,6 +624,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     unknown_circ = circular - set(chrom_sizes)
     if unknown_circ:
         raise ValueError(f"Circular chromosome(s) not in chromosome sizes: {sorted(unknown_circ)}")
+    if coverage_all_reads is not None and mappability is None:
+        raise ValueError("--coverage_all_reads needs --mappability (it fills the unmappable bins)")
 
     acc = Accumulator(chrom_sizes, bin_size, base, circular)
 
@@ -597,7 +656,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     trans_ps = compute_trans_ps(acc, map_lengths)
     print("Computing coverages ...")
     cov_raw, cov_smooth, cov_kept = compute_coverages(
-        acc, smooth, map_coarse, min_fraction=coverage_min_fraction,
+        acc, smooth, map_coarse, all_reads=coverage_all_reads, min_fraction=coverage_min_fraction,
         min_mappable_bp=coverage_min_bp, min_ratio=coverage_min_ratio)
 
     np.save(output_dir / XS,           acc.xs)
@@ -642,7 +701,11 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
             f"mappability           : {mappability}",
             f"  resolution / min    : {map_resolution} bp / score >= {min_mappability}",
             f"  coverage            : raw x {bin_size} / mappable bp; bins kept if fraction >= "
-            f"{coverage_min_fraction}, >= {coverage_min_bp} mappable bp, >= {coverage_min_ratio} x local median",
+            f"{coverage_min_fraction}, >= {coverage_min_bp} mappable bp"
+            + (f", >= {coverage_min_ratio} x local median" if coverage_min_ratio > 0
+               else " (low-coverage bins kept)"),
+            "  excluded bins       : " + (f"from all aligned reads ({coverage_all_reads})"
+                                         if coverage_all_reads else "linear interpolation"),
             f"  mappable genome     : {mappable:,.0f} / {total:,} bp ({100 * mappable / total:.1f}%)",
         ]
     else:
@@ -703,9 +766,14 @@ def main():
                              "is >= this value, else interpolated (default=0.8)")
     parser.add_argument("--coverage_min_bp", type=int, default=100,
                         help="... and if they contain >= this number of mappable bp (default=100)")
-    parser.add_argument("--coverage_min_ratio", type=float, default=0.5,
-                        help="... and if their corrected coverage is >= this ratio x the local "
-                             "median of the 10 closest kept bins on each side; 0 to disable (default=0.5)")
+    parser.add_argument("--coverage_min_ratio", type=float, default=0.0,
+                        help="Optional: also exclude mappable bins whose corrected coverage is < this "
+                             "ratio x the local median (10 closest kept bins on each side). Off by "
+                             "default: low coverage can be real (default=0)")
+    parser.add_argument("--coverage_all_reads", default=None,
+                        help="Optional: coverage_all_reads.npz (streaming_classifier_v2.py "
+                             "--coverage_all_reads): excluded bins get the coverage of all aligned "
+                             "reads instead of an interpolation")
     args = parser.parse_args()
 
     generate_statistics(
@@ -728,6 +796,7 @@ def main():
         coverage_min_fraction = args.coverage_min_fraction,
         coverage_min_bp  = args.coverage_min_bp,
         coverage_min_ratio = args.coverage_min_ratio,
+        coverage_all_reads = args.coverage_all_reads,
     )
 
 

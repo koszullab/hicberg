@@ -15,12 +15,16 @@ Outputs:
   - group2_2_chunk{i}.fastq  : group2 R2 split by n_cpus
   - chimeric_names.txt       : read names of chimeric reads
   - stats.txt                : summary statistics
+  - coverage_all_reads.npz   : (option) 5' positions of all aligned reads (incl. ambiguous,
+                               at bowtie2's random best position), 100-bp bins
 """
 
 import sys
 import re
 import argparse
 from pathlib import Path
+
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,70 @@ def fast_outer_5prime(fields, is_reverse):
 
 
 # ---------------------------------------------------------------------------
+# Coverage of all aligned reads
+# ---------------------------------------------------------------------------
+
+COVERAGE_ALL = "coverage_all_reads.npz"
+
+
+def sam_chrom_sizes(sam_path):
+    """{chrom: length} from the @SQ lines of a SAM header."""
+    sizes = {}
+    with open(sam_path) as fh:
+        for line in fh:
+            if not line.startswith('@'):
+                break
+            if line.startswith('@SQ'):
+                tags = dict(t.split(':', 1) for t in line.rstrip('\n').split('\t')[1:])
+                sizes[tags['SN']] = int(tags['LN'])
+    return sizes
+
+
+class AllReadsCoverage:
+    """
+    5' positions of ALL aligned reads (groups 1 and 2, and the mapped mate of
+    group 0), binned at `resolution` bp. A multi-mapping read is counted at the
+    position bowtie2 reported, chosen at random among its best alignments:
+    on average each copy of a repeat gets its share, which estimates the
+    coverage of regions without uniquely mappable reads.
+    """
+
+    def __init__(self, chrom_sizes, resolution=100, flush_every=1_000_000):
+        self.res = resolution
+        self.names = list(chrom_sizes)
+        self.n_bins = {c: -(-L // resolution) for c, L in chrom_sizes.items()}
+        offsets = np.concatenate([[0], np.cumsum(list(self.n_bins.values()))[:-1]])
+        self.offset = dict(zip(self.names, offsets.tolist()))
+        self._where = {c: (self.offset[c], self.n_bins[c] - 1) for c in self.names}
+        self.counts = np.zeros(int(sum(self.n_bins.values())), dtype=np.int64)
+        self.buffer = []
+        self.flush_every = flush_every
+
+    def add(self, fields, flag):
+        """Count a read; returns its 5' position (None if unmapped), to be reused."""
+        if flag & 4:
+            return None
+        pos = fast_outer_5prime(fields, bool(flag & 16))
+        where = self._where.get(fields[2])
+        if where is not None:
+            b = (pos - 1) // self.res
+            self.buffer.append(where[0] + (b if 0 <= b <= where[1] else min(max(b, 0), where[1])))
+            if len(self.buffer) >= self.flush_every:
+                self.flush()
+        return pos
+
+    def flush(self):
+        if self.buffer:
+            self.counts += np.bincount(self.buffer, minlength=len(self.counts))
+            self.buffer = []
+
+    def save(self, path):
+        self.flush()
+        np.savez_compressed(path, resolution=self.res, **{
+            c: self.counts[self.offset[c]:self.offset[c] + self.n_bins[c]] for c in self.names})
+
+
+# ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
 
@@ -227,7 +295,12 @@ def write_fastq_record(fh, query_name, sequence, qualities):
 # ---------------------------------------------------------------------------
 
 def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
-             threshold_clip=30, min_aligned_frac=0.5):
+             threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False):
+    """
+    coverage_all_reads: also count the 5' positions of all aligned reads
+    (coverage_all_reads.npz, ~+25% time), used by statistics_v2.py
+    --coverage_all_reads to estimate the coverage of unmappable bins.
+    """
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +335,8 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         'chunk_index':    0,   # round-robin counter for splitting
     }
 
+    cov_all = AllReadsCoverage(sam_chrom_sizes(sam1_path)) if coverage_all_reads else None
+
     # --- Stream both SAM files simultaneously ---
     with open(sam1_path) as fh1, open(sam2_path) as fh2:
 
@@ -285,6 +360,8 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             (line1, f1), (line2, f2) = a1, a2
             flag1, flag2 = int(f1[1]), int(f2[1])
             stats['total_pairs'] += 1
+            if cov_all is not None:
+                pos1, pos2 = cov_all.add(f1, flag1), cov_all.add(f2, flag2)
 
             # ----------------------------------------------------------------
             # GROUP 0 — at least one unmapped
@@ -299,10 +376,12 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             # ----------------------------------------------------------------
             if not has_xs_tag(f1[11]) and not has_xs_tag(f2[11]):
                 rev1, rev2 = bool(flag1 & 16), bool(flag2 & 16)
+                if cov_all is None:
+                    pos1, pos2 = fast_outer_5prime(f1, rev1), fast_outer_5prime(f2, rev2)
                 f_pairs.write(
                     f"{f1[0]}\t"
-                    f"{f1[2]}\t{fast_outer_5prime(f1, rev1)}\t"
-                    f"{f2[2]}\t{fast_outer_5prime(f2, rev2)}\t"
+                    f"{f1[2]}\t{pos1}\t"
+                    f"{f2[2]}\t{pos2}\t"
                     f"{'-' if rev1 else '+'}\t{'-' if rev2 else '+'}\n"
                 )
                 stats['group1'] += 1
@@ -360,6 +439,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             write_fastq_record(g2_r1_files[chunk_idx], r1['query_name'], seq1, qual1)
             write_fastq_record(g2_r2_files[chunk_idx], r2['query_name'], seq2, qual2)
 
+    if cov_all is not None:
+        cov_all.save(output_dir / COVERAGE_ALL)
+
     # --- Close all files ---
     f_group0.close()
     f_chimeric.close()
@@ -412,6 +494,12 @@ def main():
         "--min_aligned_frac", type=float, default=0.5,
         help="Minimum aligned fraction to call a read chimeric (default=0.5)"
     )
+    parser.add_argument(
+        "--coverage_all_reads", action="store_true",
+        help="Also save the 5' positions of all aligned reads (incl. ambiguous) in "
+             "100-bp bins (coverage_all_reads.npz, ~+25%% time), for "
+             "statistics_v2.py --coverage_all_reads"
+    )
 
     args = parser.parse_args()
 
@@ -423,6 +511,7 @@ def main():
         min_chunk_bp      = args.min_chunk_bp,
         threshold_clip    = args.threshold_clip,
         min_aligned_frac  = args.min_aligned_frac,
+        coverage_all_reads = args.coverage_all_reads,
     )
 
 

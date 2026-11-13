@@ -72,6 +72,39 @@ def test_contact_matrix_counts_and_symmetry(tmp_path):
     assert np.array_equal(m, m.T)
 
 
+def test_unbiased_keeps_zeros_and_averages_one():
+    rng = np.random.default_rng(0)
+    mat = rng.poisson(0.15, (60, 60)).astype(float)       # sparse, ~86% zeros
+    mat = np.triu(mat) + np.triu(mat, 1).T
+    oe = dn.obs_exp_unbiased(mat, intra=True)
+    dist = np.abs(np.subtract.outer(np.arange(60), np.arange(60)))
+    empty_diag = np.array([np.diagonal(mat, k).sum() == 0 for k in range(60)])[dist]
+    assert np.all(oe[(mat == 0) & ~empty_diag] == 0)       # zeros stay zeros
+    assert np.all(np.isnan(oe[empty_diag]))                 # no expected → NaN (filled later)
+    for k in range(0, 50):
+        diag = np.diagonal(oe, k)
+        if np.nansum(np.diagonal(mat, k)) > 0:
+            assert np.nanmean(diag) == pytest.approx(1.0)
+
+
+def test_sparse_trans_block_not_inflated():
+    rng = np.random.default_rng(1)
+    mat = rng.poisson(0.13, (200, 300)).astype(float)      # like yeast trans at 2 kb
+    v1 = dn.block_density(mat, intra=False, method="v1")
+    ub = dn.block_density(mat, intra=False, method="unbiased")
+    assert np.median(v1) > 1.6                              # v1: ≈ 1 + fraction of zeros
+    assert np.median(ub) == pytest.approx(1.0, abs=0.1)
+
+
+def test_unbiased_bad_bins_filled():
+    mat = np.full((40, 40), 3.0)
+    mat[10:13, :] = np.nan
+    mat[:, 10:13] = np.nan
+    d = dn.block_density(mat, intra=True, patch_small=5, patch_large=9, method="unbiased")
+    assert np.isfinite(d).all()
+    np.testing.assert_allclose(d, 1.0)
+
+
 def test_block_density_neutral_on_uniform_matrix():
     mat = np.full((30, 30), 5.0)
     d = dn.block_density(mat, intra=True, patch_small=3, patch_large=5)

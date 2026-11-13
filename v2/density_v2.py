@@ -119,15 +119,50 @@ def detrend_intra(mat, max_val=10):
     return out
 
 
-def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10):
-    """Density map of one chromosome pair (mat: counts with NaN on bad bins)."""
+def obs_exp_unbiased(mat, intra):
+    """
+    Observed / expected with the zeros kept as information:
+      intra: expected = mean of each diagonal over the defined (non-NaN)
+             pixels, zeros included; trans: expected = block mean, zeros included.
+    Pixels whose expected is 0 (no contact at all) → NaN (filled later).
+    The mean of the result is 1 on each diagonal / block, whatever the sparsity.
+    """
+    if not intra:
+        mean = np.nanmean(mat) if np.isfinite(mat).any() else 0.0
+        return mat / mean if mean > 0 else np.full(mat.shape, np.nan)
+    n = mat.shape[0]
+    rows, cols = np.indices(mat.shape)
+    dist = np.abs(rows - cols)
+    defined = np.isfinite(mat)
+    sums = np.bincount(dist[defined], weights=mat[defined], minlength=n)
+    counts = np.bincount(dist[defined], minlength=n)
+    expected = np.divide(sums, counts, out=np.zeros(n), where=counts > 0)
+    exp_px = expected[dist]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(exp_px > 0, mat / exp_px, np.nan)
+    out[~defined] = np.nan
+    return out
+
+
+def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1"):
+    """
+    Density map of one chromosome pair (mat: counts with NaN on bad bins).
+    method "v1": previous version (expected from the positive values only,
+    values >= max_val → 1, zeros → 1: biased upwards on sparse blocks,
+    trans median 1.84 on yeast). "unbiased": obs_exp_unbiased(), zeros kept.
+    """
     mat = mat.astype(np.float64)
-    if intra:
-        mat = detrend_intra(mat, max_val)
+    if method == "unbiased":
+        mat = obs_exp_unbiased(mat, intra)
+    elif method == "v1":
+        if intra:
+            mat = detrend_intra(mat, max_val)
+        else:
+            mean = np.nanmean(mat)
+            mat = mat / mean if mean > 0 else mat
+        mat[mat == 0] = 1.0
     else:
-        mean = np.nanmean(mat)
-        mat = mat / mean if mean > 0 else mat
-    mat[mat == 0] = 1.0
+        raise ValueError(f"Unknown density method: {method}")
 
     filled = iterative_fill(mat, patch_small, max_iter=5)
     smooth = nanmean_filter(filled, patch_large)
@@ -145,7 +180,7 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10):
 # ---------------------------------------------------------------------------
 
 def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
-                 patch_small=15, patch_large=45, max_val=10):
+                 patch_small=15, patch_large=45, max_val=10, method="v1"):
     """
     {(chrom_a, chrom_b): density} for every pair of chromosomes (a <= b in
     the chromosome order, as v1). bad_bins: boolean array over the genome bins
@@ -166,7 +201,7 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
             mat[bad_a | bad_b.all(), :] = np.nan
             mat[:, bad_b | bad_a.all()] = np.nan
         out[(a, b)] = block_density(mat, intra=(a == b), patch_small=patch_small,
-                                    patch_large=patch_large, max_val=max_val)
+                                    patch_large=patch_large, max_val=max_val, method=method)
     return out
 
 

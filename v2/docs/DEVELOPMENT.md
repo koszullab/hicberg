@@ -375,10 +375,56 @@ resolution): close to ×2 for human at 2 kb. Intra avoids it only because the
 expected is the mean of the positive values (zeros excluded), which in turn
 erases real depletions.
 
-Next (step 2), each change measured separately: mask from the mappability
-(`coverage_kept.npy`) instead of the balancing; unbiased obs / exp (zeros
-kept as 0, expected including zeros). Step 3: human scale (banded intra at
-fine resolution, coarse trans).
+**Use:** mode `full` = P(s) × density only (no coverage: the density is
+computed on the unbalanced matrix, so it already contains the 1D effects).
+For yeast its main role is the centromere clustering in trans (a read is
+more likely to come from a centromere than from the middle of an arm).
+
+**Step 2 (yeast AC1)** — `density_v2.py --method unbiased`: zeros kept as 0,
+expected = diagonal mean (intra) / block mean (trans) zeros included, no cap.
+Mask = mappability (`coverage_kept.npy`, 622 bins) instead of the balancing
+(522 bins). Medians over the 120 pairs of nuclear chromosomes:
+
+| version | median intra | median trans | CEN-CEN | CEN / trans median |
+|---|---|---|---|---|
+| A v1 (file) | 1.00 | 1.84 | 5.62 | 3.06 |
+| B v2 pairs + mappability mask + v1 method | 1.00 | 1.84 | 5.67 | 3.08 |
+| C v2 pairs + mappability mask + unbiased | 1.02 | **0.95** | 5.10 | **5.34** |
+| raw counts, same 45×45 window | | 1.00 | 5.20 | |
+
+The mask changes almost nothing; the unbiased obs / exp gives a neutral
+trans background and the raw centromere contrast. Smoothing window
+(unbiased): CEN-CEN density = raw enrichment at every scale, but the peak is
+sharp: ×24.8 at 10 kb, ×16.7 at 22 kb, ×10.0 at 42 kb, ×7.2 at 62 kb, ×5.1
+at 90 kb (v1 window). Noise on the arms (CV): 0.58 / 0.36 / 0.28 / 0.24 /
+0.22, Poisson part 0.53 / 0.24 / 0.13 / 0.09 / 0.06 (the rest is real
+structure). → idea: adaptive window (smallest one with ≥ N contacts), sharp
+near centromeres / diagonal, wide on sparse arms.
+
+Coverage: low-coverage mappable bins are now **kept** by default
+(`--coverage_min_ratio 0`): a low coverage can be real (e.g. few restriction
+sites) and must be reconstructed faithfully; filtering / normalisation come
+after the reconstruction.
+
+Interpolation anchors: only bins with ≥ half a bin of mappable bp. End of
+chrI: the last bin (490 bp, 88% mappable) is really under-covered (706 R1
+reads / 2 kb of *all* aligned reads, vs ~1580 on the arm; only 9% with XS:
+chromosome-end effect, not ambiguity). Used as an anchor it pulled the 26 kb
+of interpolated subtelomere (bins 102-114) from 2062 down to 912, whereas all
+the aligned reads (ambiguous ones included) show ~0.75× the arm level there.
+Now it keeps its own value (823) and the gap stays at 2062.
+
+**Option: unmappable bins from all aligned reads.** `streaming_classifier_v2.py
+--coverage_all_reads` (+25% time: 71 → 89 s on yeast) saves the 5' positions
+of all aligned reads in 100-bp bins (`coverage_all_reads.npz`); an ambiguous
+read is counted at the position bowtie2 reported, chosen at random among its
+best alignments, so each copy of a repeat gets its share on average.
+`statistics_v2.py --coverage_all_reads coverage_all_reads.npz`: excluded bins
+= all-reads coverage × (median group1 / all-reads ratio on fully mappable
+bins, 0.92 on yeast). Excluded bins / chromosome median: interpolation 0.88
+(Q5-Q95 0.71-1.11), all reads 0.95 (0.51-1.42). Default stays interpolation.
+
+Step 3: human scale (banded intra at fine resolution, coarse trans).
 
 ### Coverage (smoothed 1D)
 
