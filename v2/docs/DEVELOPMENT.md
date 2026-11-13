@@ -638,8 +638,26 @@ of the mappable bins of the chromosome: **0.94** (v1 0.95), expected from all
 the aligned reads 0.93. chrI subtelomere (bins 102-114) filled with the same
 bin-by-bin profile as all the aligned reads.
 
-Next: rescued.pairs (unrescued + predicted) → contact maps, unrescued vs
-rescued v1 / v2 on repeats; compare modes standard / full; human scale.
+`rescued.pairs` = unrescued + predicted (written by reattribute_v2).
+`plots_v2.plot_contact_maps`: maps side by side (whole genome 20 kb, each
+chromosome, zoomed regions), shared colour scale, with a track under each
+map: mappability under the first one, coverage before (grey) / after (red)
+under the others (y axis 1.5 × 99th percentile: the rDNA peak, 30-40k reads
+per 2-kb bin = ~150 copies collapsed on the assembly, is clipped).
+Yeast: rDNA, subtelomeres, mating-type cassettes and Ty elements, white
+before, are filled; v1 and v2 similar at map scale.
+
+**Modes full vs standard (yeast):** per-pair agreement is not a valid
+comparison: two `full` runs with different seeds agree on 42.8% of the pairs
+only (random draws among candidates), and full / standard run with the same
+seed share their random numbers (78%, inflated). Fidelity to the 2D
+organisation instead: Spearman correlation at 20 kb between the map of the
+predicted pairs alone and the group1 map, on pixels whose two bins are ≥ 90%
+mappable: **full intra 0.540, trans 0.203**; standard 0.519 / 0.145 (seed
+noise ~0.002). The density brings the trans organisation (centromere
+clustering) that the coverage product cannot → keep `full` as default.
+
+Next: human scale.
 
 ### (initial design notes)
 

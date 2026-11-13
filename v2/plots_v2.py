@@ -486,14 +486,18 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
 
 
 def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genome_bin=20000,
-                      regions=None, chromosomes=None, cmap="afmhot_r"):
+                      regions=None, chromosomes=None, cmap="afmhot_r", mappability=None):
     """
     Contact maps of several pairs files side by side (e.g. unrescued /
-    rescued v1 / rescued v2), log10(count + 1), one colour scale per page
-    shared by all the panels (0 → 99.5th percentile of the first map).
-      page 1     : whole genome at genome_bin
-      next pages : each chromosome (intra) at bin_size (chromosomes: subset)
-      last pages : regions = [(chrom, start_kb, end_kb), ...] at bin_size
+    rescued full / rescued standard), log10(count + 1), one colour scale per
+    page shared by all the panels (0 → 99.5th percentile of the first map),
+    with a 1D track under each map, sharing its x axis:
+      - first panel: fraction of mappable positions per bin (mappability =
+        statistics_v2 mappability.npy dict at bin_size), if given
+      - other panels: coverage (reads per bin) before (= first panel, grey)
+        and after (this panel, colour)
+    Pages: whole genome at genome_bin; each chromosome (chromosomes: subset)
+    at bin_size; regions = [(chrom, start_kb, end_kb), ...] at bin_size.
     pairs_files: [(label, path), ...]; chrom_sizes: {chrom: length}.
     """
     from scipy import sparse
@@ -502,54 +506,104 @@ def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genom
     names = list(chrom_sizes)
     n_bins, offsets = dn.genome_bins(chrom_sizes, bin_size)
     mats = [(lab, dn.contact_matrix(path, chrom_sizes, bin_size)) for lab, path in pairs_files]
+    # coverage = reads per bin: row sum + diagonal (a pair inside one bin has 2 reads there)
+    covs = [np.asarray(m.sum(axis=1)).ravel() + m.diagonal() for _, m in mats]
+    mapp = None
+    if mappability is not None:
+        mapp = np.concatenate([np.pad(np.asarray(mappability.get(c, np.zeros(n)))[:n],
+                                      (0, max(0, n - len(mappability.get(c, [])))))
+                               for c, n in zip(names, n_bins)])
 
-    # aggregation matrix bin_size → genome_bin, chromosome by chromosome
+    # aggregation bin_size → genome_bin, chromosome by chromosome
     k = max(1, genome_bin // bin_size)
-    starts = np.concatenate([[0], np.cumsum([-(-n // k) for n in n_bins])[:-1]])
+    n_coarse = [-(-n // k) for n in n_bins]
+    starts = np.concatenate([[0], np.cumsum(n_coarse)[:-1]])
     coarse = np.concatenate([starts[i] + np.arange(n) // k for i, n in enumerate(n_bins)])
     agg = sparse.csr_matrix((np.ones(len(coarse)), (np.arange(len(coarse)), coarse)))
 
-    def show(pdf, title, blocks, extent, ticks=None):
+    def page(pdf, title, sel, coarse_view=False, x_kb=None, ticks=None):
+        """sel: genome bin indices (fine) of the region shown."""
+        if coarse_view:
+            blocks = [(agg.T @ m @ agg).toarray() for _, m in mats]
+            tracks_cov = [agg.T @ c for c in covs]
+            track_map = (agg.T @ mapp) / np.maximum(agg.T @ np.ones(len(mapp)), 1) if mapp is not None else None
+            x = np.arange(blocks[0].shape[0]) + 0.5
+            extent = (0, blocks[0].shape[1], blocks[0].shape[0], 0)
+        else:
+            blocks = [m[sel][:, sel].toarray() for _, m in mats]
+            tracks_cov = [c[sel] for c in covs]
+            track_map = mapp[sel] if mapp is not None else None
+            x = x_kb
+            step = x_kb[1] - x_kb[0] if len(x_kb) > 1 else 1
+            extent = (x_kb[0] - step / 2, x_kb[-1] + step / 2, x_kb[-1] + step / 2, x_kb[0] - step / 2)
         logs = [np.log10(b + 1.0) for b in blocks]
         vmax = np.percentile(logs[0], 99.5) or 1.0
-        fig, axes = plt.subplots(1, len(blocks), figsize=(6.2 * len(blocks), 6), squeeze=False)
-        for ax, (lab, _), z in zip(axes[0], mats, logs):
-            im = ax.imshow(z, cmap=cmap, vmin=0, vmax=vmax, interpolation="none", extent=extent)
+        n = len(blocks)
+        # 1.5 × the 99th percentile: extreme peaks (rDNA) are clipped so the rest stays readable
+        cov_max = 1.5 * max(np.percentile(t, 99) for t in tracks_cov) or 1.0
+
+        # fixed layout (inches): square maps, tracks of exactly the same width
+        # below them, colour bar in its own column (it must not shrink the maps)
+        side, track_h, gap, vgap = 4.4, 1.1, 0.9, 0.12
+        left, right, bottom, top = 0.8, 1.0, 0.7, 0.6
+        fig_w = left + n * side + (n - 1) * gap + right
+        fig_h = bottom + track_h + vgap + side + top
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        frac = lambda x0, y0, w, h: [x0 / fig_w, y0 / fig_h, w / fig_w, h / fig_h]
+        map_y = bottom + track_h + vgap
+        for i, ((lab, _), z) in enumerate(zip(mats, logs)):
+            x0 = left + i * (side + gap)
+            ax = fig.add_axes(frac(x0, map_y, side, side))
+            im = ax.imshow(z, cmap=cmap, vmin=0, vmax=vmax, interpolation="none",
+                           extent=extent, aspect="auto")
             ax.set_title(lab, fontsize=10)
+            ax.tick_params(labelbottom=False, labelsize=7)
+            tr = fig.add_axes(frac(x0, bottom, side, track_h), sharex=ax)
+            if i == 0 and track_map is not None:
+                tr.fill_between(x, track_map, step="mid", color="grey", alpha=0.6, lw=0)
+                tr.set(ylim=(0, 1.05))
+                tr.set_ylabel("mappability", fontsize=8)
+            else:
+                tr.plot(x, tracks_cov[0], color="grey", lw=0.7, label="before")
+                if i > 0:
+                    tr.plot(x, tracks_cov[i], color="darkred", lw=0.7, label="after")
+                    tr.legend(fontsize=6, loc="upper right")
+                tr.set(ylim=(0, cov_max))
+                tr.set_ylabel("coverage", fontsize=8)
+            tr.tick_params(labelsize=7)
+            tr.set_xlim(extent[0], extent[1])
             if ticks:
-                ax.set_xticks(ticks[0], ticks[1], rotation=90, fontsize=6)
+                tr.set_xticks(ticks[0], ticks[1], rotation=90, fontsize=6)
                 ax.set_yticks(ticks[0], ticks[1], fontsize=6)
                 for o in ticks[2]:
                     ax.axhline(o, color="grey", lw=0.3)
                     ax.axvline(o, color="grey", lw=0.3)
+                    tr.axvline(o, color="grey", lw=0.3)
             else:
-                ax.set(xlabel="kb", ylabel="kb")
+                tr.set_xlabel("kb", fontsize=8)
+                ax.set_ylabel("kb", fontsize=8)
+        cax = fig.add_axes(frac(left + n * side + (n - 1) * gap + 0.2, map_y, 0.15, side))
+        fig.colorbar(im, cax=cax, label="log10(contacts + 1)")
         fig.suptitle(title, fontsize=11)
-        fig.colorbar(im, ax=axes[0].tolist(), fraction=0.015, label="log10(contacts + 1)")
         pdf.savefig(fig)
         plt.close(fig)
 
     with PdfPages(output_pdf) as pdf:
-        g = [(agg.T @ m @ agg).toarray() for _, m in mats]
-        ends = np.cumsum([-(-n // k) for n in n_bins])
+        ends = np.cumsum(n_coarse)
         mids = (np.concatenate([[0], ends[:-1]]) + ends) / 2
-        show(pdf, f"Whole genome — {genome_bin // 1000} kb bins", g,
-             (0, g[0].shape[1], g[0].shape[0], 0), (mids, names, ends[:-1]))
+        page(pdf, f"Whole genome — {genome_bin // 1000} kb bins", None, coarse_view=True,
+             ticks=(mids, names, ends[:-1]))
         for i, c in enumerate(names):
             if chromosomes is not None and c not in chromosomes:
                 continue
-            sl = slice(offsets[i], offsets[i] + n_bins[i])
-            blocks = [m[sl, sl].toarray() for _, m in mats]
-            L = chrom_sizes[c] / 1000
-            show(pdf, f"{c} — {bin_size // 1000} kb bins", blocks, (0, L, L, 0))
+            sel = np.arange(offsets[i], offsets[i] + n_bins[i])
+            page(pdf, f"{c} — {bin_size // 1000} kb bins", sel,
+                 x_kb=(np.arange(n_bins[i]) + 0.5) * bin_size / 1000)
         for c, lo, hi in (regions or []):
             i = names.index(c)
-            b0, b1 = int(lo * 1000 // bin_size), int(-(-hi * 1000 // bin_size))
-            b1 = min(b1, n_bins[i])
-            sl = slice(offsets[i] + b0, offsets[i] + b1)
-            blocks = [m[sl, sl].toarray() for _, m in mats]
-            x0, x1 = b0 * bin_size / 1000, b1 * bin_size / 1000
-            show(pdf, f"{c} {lo}-{hi} kb — {bin_size // 1000} kb bins", blocks, (x0, x1, x1, x0))
+            b0, b1 = int(lo * 1000 // bin_size), min(int(-(-hi * 1000 // bin_size)), n_bins[i])
+            page(pdf, f"{c} {lo}-{hi} kb — {bin_size // 1000} kb bins", offsets[i] + np.arange(b0, b1),
+                 x_kb=(np.arange(b0, b1) + 0.5) * bin_size / 1000)
     return mats
 
 
