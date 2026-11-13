@@ -604,7 +604,44 @@ not below 0.2 (median 0.37).
 
 ---
 
-## Module 3: reattribute_reads (TODO)
+## Module 3: reattribute_v2.py (first version done)
+
+```bash
+python3 reattribute_v2.py classifier_dir stats_dir out_dir --index genome_index \
+    --mode full --max_alignments all --n_workers 4 --threads 4   # yeast: -a
+```
+
+1. per group2 chunk: `bowtie2 --very-sensitive-local --reorder -k K` (or `-a`,
+   `--max_alignments all`, used for yeast) on R1 and R2, stdout read as a
+   stream (no SAM on disk), alignments grouped by read.
+2. **candidates = alignments with the best AS** (`--as_delta 0`). v1 kept all
+   the -k alignments: on yeast ~26% of them score worse than the best (≥ ~1
+   mismatch, ~300× less likely the true origin with a 1% error rate).
+3. propensity of every R1 × R2 combination, vectorised over batches of pairs
+   (combination indices with np.repeat, segmented weighted draw on a global
+   cumsum), same conventions as the statistics: `random`, `ps`, `standard`
+   = P(s) × cov × cov, `full` = P(s) × density. Seeded draw (one seed per chunk).
+4. `predicted.pairs` = unrescued.pairs format + n_candidates1/2.
+
+**Yeast AC1, mode full, -a:** 1,524,893 group2 pairs, all placed, 7.0 / 7.1
+candidates per read, 56 combinations per pair, 70.5% intra (group1 cis:
+69.9%), **2 min** with 4 workers × 4 threads, 0.6 GB RAM.
+
+Validation vs v1 (same read placed: same chromosome, ±50 bp, both reads):
+34% overall (random draws among several candidates: 1×1 68.5%, 2-4 57%,
+5-50 20%, > 50 10%). For pairs with a single best combination in v2, v1
+places **17.6% of the reads on a copy with a worse score** (median gap 8 ≈
+1 mismatch) → 1 − 0.824² ≈ 32% of these pairs differ: the best-score filter
+fixes a v1 defect.
+Coverage reconstructed (group1 + predicted) in the unmappable bins / median
+of the mappable bins of the chromosome: **0.94** (v1 0.95), expected from all
+the aligned reads 0.93. chrI subtelomere (bins 102-114) filled with the same
+bin-by-bin profile as all the aligned reads.
+
+Next: rescued.pairs (unrescued + predicted) → contact maps, unrescued vs
+rescued v1 / v2 on repeats; compare modes standard / full; human scale.
+
+### (initial design notes)
 
 ### Context
 
