@@ -84,13 +84,13 @@ def test_reattribute_stream_end_to_end(stats_dir, mode):
     laws = ra.Laws(stats_dir, mode)
     # R1 has 2 copies (chrA 10000 and chrB 50000); R2 is unique near the first copy
     r1 = [sam("p1", 0, "chrA", 10_000, 60), sam("p1", 256, "chrB", 50_000, 60),
-          sam("p1", 256, "chrB", 80_000, 40)]            # worse score: dropped
+          sam("p1", 256, "chrB", 80_000, 40)]            # worse score: weight ~1e-6
     r2 = [sam("p1", 16, "chrA", 11_951, 60)]              # 5' = 12000
     out = io.StringIO()
     stats = ra.reattribute_stream(r1 * 1, r2 * 1, laws, out, np.random.default_rng(0))
-    assert stats["placed"] == 1 and stats["cand1"] == 2 and stats["cand2"] == 1
+    assert stats["placed"] == 1 and stats["cand1"] == 3 and stats["cand2"] == 1   # AS 40 kept (weight e^-14)
     fields = out.getvalue().split("\t")
-    assert len(fields) == 9 and fields[-2:] == ["2", "1\n"]
+    assert len(fields) == 9 and fields[-2:] == ["3", "1\n"]
     if mode != "random":
         # cis at 2 kb is far more likely than trans: draw many times
         wins = 0
@@ -106,3 +106,28 @@ def test_reattribute_stream_detects_desync(stats_dir):
     with pytest.raises(ValueError):
         ra.reattribute_stream([sam("a", 0, "chrA", 10, 60)], [sam("b", 0, "chrA", 10, 60)],
                               laws, io.StringIO(), np.random.default_rng(0))
+
+
+def test_score_lambda_and_weights():
+    assert ra.score_lambda(0.01) == pytest.approx(np.log(297) / 8)
+    assert np.isinf(ra.score_lambda(0))
+    w = ra.alignment_weights([70, 62, 70], ra.score_lambda(0.01))
+    np.testing.assert_allclose(w, [1, 1 / 297, 1], rtol=1e-6)        # 1 mismatch = ×1/297
+    np.testing.assert_allclose(ra.alignment_weights([70, 62, 70], np.inf), [1, 0, 1])
+
+
+def test_many_near_copies_share_the_reads(stats_dir):
+    # poly-T-like read: 1 perfect locus, 300 loci at 1 mismatch (AS -8), mode random:
+    # the perfect copy gets ~1 / (1 + 300/297) ≈ 50% of the draws, not 100%
+    laws = ra.Laws(stats_dir, "random")
+    r1 = [sam("p", 0, "chrA", 1000, 70)] + [sam("p", 256, "chrB", 100 + 200 * k, 62) for k in range(300)]
+    r2 = [sam("p", 0, "chrA", 50_000, 70)]
+    hits = 0
+    for seed in range(400):
+        out = io.StringIO()
+        ra.reattribute_stream(r1, r2, laws, out, np.random.default_rng(seed))
+        hits += out.getvalue().split("\t")[2] == "1000"
+    assert 0.40 < hits / 400 < 0.60
+    out = io.StringIO()                                                  # error_rate 0: best only
+    ra.reattribute_stream(r1, r2, laws, out, np.random.default_rng(0), error_rate=0)
+    assert out.getvalue().split("\t")[2] == "1000"

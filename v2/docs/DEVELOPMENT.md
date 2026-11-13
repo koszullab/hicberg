@@ -614,18 +614,34 @@ python3 reattribute_v2.py classifier_dir stats_dir out_dir --index genome_index 
 1. per group2 chunk: `bowtie2 --very-sensitive-local --reorder -k K` (or `-a`,
    `--max_alignments all`, used for yeast) on R1 and R2, stdout read as a
    stream (no SAM on disk), alignments grouped by read.
-2. **candidates = alignments with the best AS** (`--as_delta 0`). v1 kept all
-   the -k alignments: on yeast ~26% of them score worse than the best (≥ ~1
-   mismatch, ~300× less likely the true origin with a 1% error rate).
+2. **candidates weighted by their likelihood**: alignments within `--as_delta`
+   (30) of the best AS, weight exp(−λ (best AS − AS)), λ = ln(3(1−e)/e) / 8
+   per AS point (a high-quality mismatch costs 8 points in local mode),
+   `--error_rate` e = 0.01 → λ = 0.71, 1 mismatch = ×1/297; e = 0 → best-score
+   alignments only. v1 kept all the -k alignments with the same weight (~26%
+   of them score ≥ 1 mismatch below the best on yeast).
+   History: a first v2 kept the **best-score alignments only**. It created
+   artefactual trans spots with the rDNA (chrXIV 415 kb ×7.7 v1, chrXIV 359 kb
+   ×7.6, chrIV 1365 kb ×4.4, chrIV 685 kb, chrVIII 564 kb), partners piled up
+   within a few bp: **poly-T reads** (no positional information; 1 perfect
+   locus, 230-460 loci at 1 mismatch / 1 clipped base) all sent to the same
+   longest poly-T tracts. With 300 near copies at ×1/297 each, the perfect
+   copy should get ~50% only: the likelihood weighting does that. Spots after
+   weighting: 99 / 197 / 103 / 88 / 83 contacts (best-only 525 / 506 / 346 /
+   203 / 168, v1 68 / 67 / 79 / 60 / 55); the real 2µ ↔ rDNA contact (partners
+   spread over the plasmid, copy numbers) unchanged (3462, v1 3447).
 3. propensity of every R1 × R2 combination, vectorised over batches of pairs
    (combination indices with np.repeat, segmented weighted draw on a global
    cumsum), same conventions as the statistics: `random`, `ps`, `standard`
    = P(s) × cov × cov, `full` = P(s) × density. Seeded draw (one seed per chunk).
 4. `predicted.pairs` = unrescued.pairs format + n_candidates1/2.
 
-**Yeast AC1, mode full, -a:** 1,524,893 group2 pairs, all placed, 7.0 / 7.1
-candidates per read, 56 combinations per pair, 70.5% intra (group1 cis:
-69.9%), **2 min** with 4 workers × 4 threads, 0.6 GB RAM.
+**Yeast AC1, mode full, -a, likelihood weighting:** 1,524,893 group2 pairs,
+all placed, 10.2 / 10.5 candidates per read, 101 combinations per pair, 70.8%
+intra (group1 cis: 69.9%), **2 min 54 s** with 4 workers × 4 threads.
+Unmappable bins reconstructed at 0.94 × the mappable level (0.93 expected);
+predicted-only map vs group1 on mappable pixels: intra 0.544, trans 0.208.
+(The numbers below were measured with the first, best-only version.)
 
 Validation vs v1 (same read placed: same chromosome, ±50 bp, both reads):
 34% overall (random draws among several candidates: 1×1 68.5%, 2-4 57%,

@@ -10,10 +10,14 @@ For each group2 chunk (group2_1_chunk{i}.fastq / group2_2_chunk{i}.fastq,
 streaming_classifier_v2.py):
   1. bowtie2 --very-sensitive-local --reorder -k K (or -a) on R1 and R2,
      read as a stream (no SAM written on disk), alignments grouped by read
-  2. candidates of a read = its alignments with the best score (AS), or
-     within --as_delta of it. The previous version kept all the -k
-     alignments: ~26% of them have at least one more mismatch than the best
-     one (yeast), i.e. are ~300× less likely to be the true origin
+  2. candidates of a read = its alignments within --as_delta of the best
+     score (AS), each weighted by its likelihood exp(-lambda × (best AS - AS)),
+     lambda from --error_rate (1 mismatch = ×1/300 at 1%). The previous
+     version kept all the -k alignments with the same weight (~26% of them
+     have at least one more mismatch than the best one on yeast); a first v2
+     kept the best-score ones only, which sent every low-complexity read
+     (poly-T: 1 perfect locus, hundreds at 1 mismatch) to the same few loci
+     (artefactual contact spots); the likelihood weighting spreads them
   3. propensity of every R1 × R2 combination, vectorised over batches of
      pairs, with the same conventions as the statistics (5' positions,
      orientation after ordering by position, circular distances):
@@ -89,6 +93,28 @@ def best_candidates(block, as_delta=0):
         return block
     best = max(a[3] for a in block)
     return [a for a in block if a[3] >= best - as_delta]
+
+
+def score_lambda(error_rate, mismatch_cost=8):
+    """
+    Log-likelihood cost of one alignment-score point. In bowtie2 local mode a
+    high-quality mismatch replaces the +2 match bonus by a -6 penalty (8
+    points), and is e / (3 (1 - e)) times less likely than a correct base:
+    lambda = ln(3 (1 - e) / e) / 8 (0.71 for e = 1%). error_rate <= 0 →
+    infinite (only the best-score alignments count).
+    """
+    if error_rate <= 0:
+        return np.inf
+    return np.log(3 * (1 - error_rate) / error_rate) / mismatch_cost
+
+
+def alignment_weights(scores, lam):
+    """Relative likelihood of each alignment of a read: exp(-lambda × (best AS - AS))."""
+    scores = np.asarray(scores, dtype=np.float64)
+    gap = scores.max() - scores
+    if np.isinf(lam):
+        return (gap == 0).astype(np.float64)
+    return np.exp(-lam * gap)
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +255,17 @@ def weighted_draw(weights, starts, sizes, rng):
 # One chunk
 # ---------------------------------------------------------------------------
 
-def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=0, batch_combinations=2_000_000):
+def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rate=0.01,
+                       batch_combinations=2_000_000):
     """
     Re-attribute the pairs of two SAM streams (R1, R2) and write the chosen
-    combination of each pair to out_fh. Returns counters.
+    combination of each pair to out_fh. Candidates: alignments within as_delta
+    of the best score, each weighted by its likelihood (alignment_weights,
+    error_rate; 0 → best-score ties only). Returns counters.
     """
+    lam = score_lambda(error_rate)
+    if np.isinf(lam):
+        as_delta = 0
     stats = dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0)
     batch = []                     # (name, cands1, cands2)
     n_comb = 0
@@ -251,10 +283,12 @@ def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=0, batch_comb
             flat = [a for c in side for a in c]
             arrays.append((np.array([laws.code.get(a[0], -1) for a in flat], dtype=np.int64),
                            np.array([a[1] for a in flat], dtype=np.int64),
-                           np.array([a[2] for a in flat], dtype=bool)))
+                           np.array([a[2] for a in flat], dtype=bool),
+                           np.concatenate([alignment_weights([a[3] for a in c], lam) for c in side])))
         i1, i2, starts, k = combination_indices(n1, n2)
-        (c1, p1, r1), (c2, p2, r2) = arrays
-        w = laws.propensity(c1[i1], p1[i1], r1[i1], c2[i2], p2[i2], r2[i2])
+        (c1, p1, r1, a1), (c2, p2, r2, a2) = arrays
+        # statistical propensity × likelihood of each of the two alignments
+        w = laws.propensity(c1[i1], p1[i1], r1[i1], c2[i2], p2[i2], r2[i2]) * a1[i1] * a2[i2]
         chosen = weighted_draw(w, starts, k, rng)
         s1, s2 = i1[chosen], i2[chosen]
         for p, (name, a, b) in enumerate(zip(names, s1, s2)):
@@ -328,7 +362,8 @@ def reattribute_chunk(job):
                     stdout=subprocess.PIPE, stderr=log, text=True, bufsize=1 << 20))
             streams = [p.stdout for p in procs]
         with open(job["out"], "w") as out:
-            stats = reattribute_stream(streams[0], streams[1], laws, out, rng, job["as_delta"])
+            stats = reattribute_stream(streams[0], streams[1], laws, out, rng, job["as_delta"],
+                                       job["error_rate"])
         for p in procs:
             if p.wait() != 0:
                 raise RuntimeError(f"bowtie2 failed (see {job['out']}.*.bowtie2.log)")
@@ -340,8 +375,8 @@ def reattribute_chunk(job):
 
 
 def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
-                max_alignments="100", as_delta=0, n_workers=1, threads=1, circular=None,
-                bin_size=2000, seed=0, sam_pairs=None):
+                max_alignments="100", as_delta=30, n_workers=1, threads=1, circular=None,
+                bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01):
     """
     Re-attribute all the group2 chunks of classifier_dir (in parallel, one
     process per chunk) and write output_dir/predicted.pairs.
@@ -353,7 +388,8 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     base = dict(stats_dir=str(stats_dir), mode=mode, circular=circular, bin_size=bin_size,
-                index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta)
+                index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta,
+                error_rate=error_rate)
     jobs = []
     if sam_pairs:
         for i, (s1, s2) in enumerate(sam_pairs):
@@ -395,7 +431,9 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
     lines = [
         f"mode                  : {mode}",
         f"alignments            : {'-a (all)' if str(max_alignments) == 'all' else f'-k {max_alignments}'}, "
-        f"candidates within {as_delta} of the best score",
+        + (f"candidates within {as_delta} of the best score, weighted by their likelihood "
+           f"(error rate {error_rate:g}, {score_lambda(error_rate):.2f} per AS point)"
+           if error_rate > 0 else "best-score candidates only"),
         f"pairs                 : {total['pairs']}",
         f"placed                : {total['placed']}",
         f"unplaced              : {total['unplaced']} (a mate without alignment)",
@@ -418,9 +456,13 @@ def main():
                         help="standard = P(s) × coverage, full = P(s) × density (default=full)")
     parser.add_argument("--max_alignments", default="100",
                         help="bowtie2 -k value, or 'all' for -a (default=100)")
-    parser.add_argument("--as_delta", type=int, default=0,
-                        help="Keep the alignments within this AS of the best one (default=0: "
-                             "best-score ties only; very large = all, as v1)")
+    parser.add_argument("--error_rate", type=float, default=0.01,
+                        help="Sequencing error rate of the likelihood weight of each alignment, "
+                             "exp(-lambda x (best AS - AS)) (default=0.01: 1 mismatch = x1/300). "
+                             "0 = best-score alignments only")
+    parser.add_argument("--as_delta", type=int, default=30,
+                        help="Ignore the alignments more than this AS below the best one "
+                             "(default=30: weight < 1e-9 with error_rate 0.01)")
     parser.add_argument("--n_workers", type=int, default=1, help="Chunks processed in parallel")
     parser.add_argument("--threads", type=int, default=1, help="bowtie2 threads per worker")
     parser.add_argument("--circular", default=None,
@@ -431,7 +473,7 @@ def main():
     circular = None if args.circular is None else {c for c in args.circular.split(",") if c}
     reattribute(args.classifier_dir, args.stats_dir, args.output_dir, args.index, args.mode,
                 args.max_alignments, args.as_delta, args.n_workers, args.threads, circular,
-                args.bin_size, args.seed)
+                args.bin_size, args.seed, error_rate=args.error_rate)
 
 
 if __name__ == "__main__":
