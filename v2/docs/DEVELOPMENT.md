@@ -451,6 +451,17 @@ python3 density_v2.py unrescued.pairs ./density --chrom_sizes 1.sam \
 ```
 `plots_v2.plot_density()` → `density.pdf` (genome log2 map + zooms, side by side).
 
+**In the pipeline:** `statistics_v2.py` now computes the density by default
+(unbiased, adaptive n_min 200, mappability mask and weights when
+`--mappability` is given; `--no_density`, `--density_n_min`), saves
+`density_map.npy` and `contacts.npz` (contact matrix at bin_size, upper
+triangle), and the checkpoint plots include, for each chromosome
+(`density_intra.pdf`) and each pair of chromosomes (`density_trans.pdf`, ≤ 200
+pairs), the raw obs / exp at 2 kb (not smoothed, same mask and weights) next to
+the density. Grey = excluded bins, darkest blue = zero contact. Yeast: whole
+statistics step with density and plots 65 s, 1.6 GB RAM. Human: contacts.npz
+and per-pair pages to rethink with the banded storage (step 3).
+
 Coverage: low-coverage mappable bins are now **kept** by default
 (`--coverage_min_ratio 0`): a low coverage can be real (e.g. few restriction
 sites) and must be reconstructed faithfully; filtering / normalisation come

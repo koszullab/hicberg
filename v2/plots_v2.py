@@ -12,6 +12,8 @@ a second folder (e.g. the previous hicberg version) to compare both:
   coverage.pdf      raw + smoothed coverage per chromosome
   trans_ps.pdf      trans P(s) heatmap (+ scatter v2 vs reference)
   density.pdf       log2 density map, genome + zooms (if density_map.npy)
+  density_intra.pdf raw obs / exp and density, one page per chromosome
+  density_trans.pdf same for each pair of chromosomes (if contacts.npz)
   orientations.pdf  fraction of each orientation vs distance  (v2 only, ps_counts.npz)
 
 One page per chromosome in each PDF.
@@ -29,7 +31,7 @@ import numpy as np                                    # noqa: E402
 
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
-DENSITY = "density_map.npy"
+DENSITY, CONTACTS, CHROM_SIZES = "density_map.npy", "contacts.npz", "chromosome_sizes.npy"
 PS_COUNTS, MAPPABILITY, COVERAGE_KEPT = "ps_counts.npz", "mappability.npy", "coverage_kept.npy"
 
 # Same colours as hicberg/plot.py
@@ -400,6 +402,80 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
             plt.close(fig)
 
 
+def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=200, vlim=1.5):
+    """
+    One page per chromosome (density_intra.pdf) and per pair of chromosomes
+    (density_trans.pdf, at most max_trans_pairs), with 2 matrices side by side:
+    the raw obs / exp at bin_size (not smoothed, same mask and mappable-length
+    weights as the density) and the density used by the re-attribution.
+    Needs density_map.npy and contacts.npz (statistics_v2.py).
+    """
+    import itertools
+    from scipy import sparse
+    import density_v2 as dn
+
+    stats_dir, output_dir = Path(stats_dir), Path(output_dir)
+    density = load_dict(stats_dir, DENSITY)
+    sizes = load_dict(stats_dir, CHROM_SIZES)
+    upper = sparse.load_npz(stats_dir / CONTACTS)
+    matrix = (upper + upper.T - sparse.diags(upper.diagonal())).tocsr()
+    names = [a for a, b in density if a == b]
+    n_bins = {c: density[(c, c)].shape[0] for c in names}
+    offsets = dict(zip(names, np.concatenate([[0], np.cumsum([n_bins[c] for c in names])[:-1]])))
+
+    kept, frac = load_dict(stats_dir, COVERAGE_KEPT), load_dict(stats_dir, MAPPABILITY)
+    bad = {c: (~kept[c][:n_bins[c]] if kept is not None and c in kept else np.zeros(n_bins[c], bool))
+           for c in names}
+    weights = {}
+    for c in names:
+        n = n_bins[c]
+        if frac is not None and c in frac:
+            f = np.zeros(n)
+            f[:min(n, len(frac[c]))] = frac[c][:n]
+            weights[c] = f * np.clip(sizes[c] - np.arange(n) * bin_size, 0, bin_size) / bin_size
+        else:
+            weights[c] = None
+
+    def raw_obs_exp(a, b):
+        blk = matrix[offsets[a]:offsets[a] + n_bins[a], offsets[b]:offsets[b] + n_bins[b]]
+        blk = blk.toarray().astype(np.float64)
+        blk[bad[a], :] = np.nan
+        blk[:, bad[b]] = np.nan
+        return dn.obs_exp_unbiased(blk, a == b, weights[a], weights[b])
+
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("lightgrey")
+    kb = bin_size / 1000
+
+    def page(pdf, a, b):
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5.8))
+        for ax, (lab, mat) in zip(axes, [(f"raw obs / exp {kb:g} kb (not smoothed)", raw_obs_exp(a, b)),
+                                         ("density (unbiased, adaptive window)", density[(a, b)])]):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                z = np.log2(mat)
+            z[mat == 0] = -vlim          # zero contact: darkest blue (grey = excluded bins only)
+            im = ax.imshow(z, cmap=cmap, vmin=-vlim, vmax=vlim,
+                           interpolation="none", aspect="auto" if a != b else "equal")
+            ax.set_title(lab, fontsize=9)
+            ax.set(xlabel=f"{b} bin ({kb:g} kb)", ylabel=f"{a} bin ({kb:g} kb)")
+        title = a if a == b else f"{a} × {b}"
+        fig.suptitle(f"{title} — log2 (grey = excluded bins, darkest blue = 0 contact)", fontsize=11)
+        fig.colorbar(im, ax=axes.tolist(), fraction=0.02, label="log2")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    with PdfPages(output_dir / "density_intra.pdf") as pdf:
+        for c in names:
+            page(pdf, c, c)
+    pairs = list(itertools.combinations(names, 2))
+    if len(pairs) > max_trans_pairs:
+        print(f"  density_trans.pdf: first {max_trans_pairs} of {len(pairs)} chromosome pairs")
+        pairs = pairs[:max_trans_pairs]
+    with PdfPages(output_dir / "density_trans.pdf") as pdf:
+        for a, b in pairs:
+            page(pdf, a, b)
+
+
 def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
              labels=("v2", "reference")):
     output_dir = Path(output_dir or stats_dir)
@@ -423,6 +499,9 @@ def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
             maps.append((labels[1], Path(compare_dir) / DENSITY))
         plot_density(maps, output_dir / "density.pdf")
         done.append("density.pdf")
+        if (Path(stats_dir) / CONTACTS).is_file():
+            plot_density_matrices(stats_dir, output_dir, bin_size)
+            done += ["density_intra.pdf", "density_trans.pdf"]
 
     print(f"Plots saved in {output_dir}: {', '.join(done)}")
     if compare_dir:

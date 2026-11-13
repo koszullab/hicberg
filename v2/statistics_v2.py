@@ -11,6 +11,7 @@ single streaming pass (constant memory, vectorised with numpy):
         circle (-/+, outward)  → circles.npy
         weird  (++ and --)     → weirds.npy
   - trans-chromosomal pseudo P(s)   → trans_ps.npy
+  - 2D density (mode full)         → density_map.npy (+ contacts.npz), density_v2
   - 1D coverage (raw + final)       → coverage1.npy / coverage.npy
         final = raw / mappable fraction (bins too unmappable interpolated)
         with --mappability, otherwise mad_smoothing2 (previous version)
@@ -52,6 +53,8 @@ COVERAGE       = "coverage.npy"    # smoothed
 PS_COUNTS      = "ps_counts.npz"   # raw counts, 4 orientations (QC)
 MAPPABILITY    = "mappability.npy" # fraction of mappable positions per coverage bin
 COVERAGE_KEPT  = "coverage_kept.npy"  # coverage bins used (others interpolated)
+DENSITY_MAP    = "density_map.npy"    # 2D density (density_v2)
+CONTACTS       = "contacts.npz"       # contact matrix at bin_size (upper triangle, scipy sparse)
 
 # Orientation codes (after ordering reads by position)
 ORIENTATIONS = ("+-", "-+", "++", "--")   # uncut, circle, weird, weird
@@ -606,7 +609,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         ps_pool_distance=1000,
                         plots=True, mappability=None, map_resolution=100,
                         min_mappability=1.0, coverage_min_fraction=0.8,
-                        coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None):
+                        coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None,
+                        density=True, density_n_min=200):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -675,6 +679,25 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     if cov_kept is not None:
         np.save(output_dir / COVERAGE_KEPT, cov_kept)
 
+    # --- 2D density (mode full = P(s) × density) ---
+    if density:
+        import density_v2 as dn
+        from scipy import sparse
+        print("Computing density map ...")
+        matrix = dn.contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize)
+        n_bins, _ = dn.genome_bins(chrom_sizes, bin_size)
+        bad = weights = None
+        if cov_kept is not None:
+            bad = np.concatenate([~cov_kept[c][:n] for c, n in zip(chrom_sizes, n_bins)])
+        if map_coarse is not None:
+            weights = np.concatenate([
+                map_coarse[c][:n] * np.clip(L - np.arange(n) * bin_size, 0, bin_size) / bin_size
+                for (c, L), n in zip(chrom_sizes.items(), n_bins)])
+        maps = dn.density_maps(matrix, chrom_sizes, bin_size, bad, method="unbiased",
+                               smoothing="adaptive", n_min=density_n_min, weights=weights)
+        np.save(output_dir / DENSITY_MAP, maps)
+        sparse.save_npz(output_dir / CONTACTS, sparse.triu(matrix).tocsr())
+
     # --- Stats ---
     s = acc.stats
     n = max(s["pairs"], 1)
@@ -710,6 +733,10 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         ]
     else:
         lines.append("mappability           : - (trapezoid areas)")
+    lines.append("density               : " + (
+        f"unbiased, adaptive window (>= {density_n_min} contacts)"
+        + (", mappability mask and weights" if map_coarse is not None else "")
+        if density else "-"))
     lines.append(f"time                  : {time.time() - t0:.0f} s")
     (output_dir / "statistics_stats.txt").write_text("\n".join(lines) + "\n")
     print("\n=== Statistics ===\n" + "\n".join(lines))
@@ -770,6 +797,10 @@ def main():
                         help="Optional: also exclude mappable bins whose corrected coverage is < this "
                              "ratio x the local median (10 closest kept bins on each side). Off by "
                              "default: low coverage can be real (default=0)")
+    parser.add_argument("--no_density", action="store_true",
+                        help="Do not compute the 2D density map (mode full)")
+    parser.add_argument("--density_n_min", type=int, default=200,
+                        help="Density: min contacts per adaptive window (default=200)")
     parser.add_argument("--coverage_all_reads", default=None,
                         help="Optional: coverage_all_reads.npz (streaming_classifier_v2.py "
                              "--coverage_all_reads): excluded bins get the coverage of all aligned "
@@ -797,6 +828,8 @@ def main():
         coverage_min_bp  = args.coverage_min_bp,
         coverage_min_ratio = args.coverage_min_ratio,
         coverage_all_reads = args.coverage_all_reads,
+        density          = not args.no_density,
+        density_n_min    = args.density_n_min,
     )
 
 
