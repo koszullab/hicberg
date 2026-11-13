@@ -457,7 +457,7 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
         extent = (0, sizes[b] / 1e3, sizes[a] / 1e3, 0)          # axes in kb
         panels = [(f"raw obs / exp {kb * k:g} kb (not smoothed)", raw_obs_exp(a, b, k), vlim_raw),
                   (f"density (unbiased, adaptive window), {kb:g} kb", density[(a, b)], vlim)]
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6.2))
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6.2), gridspec_kw={"wspace": 0.45})
         for ax, (lab, mat, lim) in zip(axes, panels):
             with np.errstate(divide="ignore", invalid="ignore"):
                 z = np.log2(mat)
