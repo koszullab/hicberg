@@ -31,7 +31,7 @@ def pairs_file(tmp_path):
     path = tmp_path / "unrescued.pairs"
     with open(path, "w") as fh:
         fh.write("## pairs format v1.0\n")
-        fh.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+        fh.write("#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n")
         for p in PAIRS:
             fh.write("\t".join(map(str, p)) + "\n")
     return path

@@ -604,6 +604,62 @@ not below 0.2 (median 0.37).
 
 ---
 
+## Pipeline CLI: hicberg_v2.py
+
+```bash
+python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 \
+    --circular plasmid2micron,chrMT --max_alignments all \
+    --hicstuff --enzyme DpnII,HinfI          # [--index existing_prefix]
+# checkpoint: --exit_stage stats, check out/statistics/plots, then --start_stage rescue
+```
+
+Stages: `index` (bowtie2-build unless `--index`) → `mappability` (GenMap,
+k = read length read from R1, `--no_mappability`) → `align` (bowtie2
+--very-sensitive-local --reorder, SAM deleted after classify unless
+`--keep_sam`) → `classify` → `stats` (+ checkpoint plots) → `rescue` →
+`matrices`. Chromosome sizes from the FASTA (`out/chrom.sizes`).
+Group2 chunks = cpus / 4, re-aligned and re-attributed in parallel.
+
+**matrices_v2.py** (last stage):
+- `--hicstuff`: `hicstuff pipeline --start-stage=pairs --filter --duplicates`
+  on unrescued.pairs and rescued.pairs (non-informative events: uncuts,
+  loops, weirds; PCR duplicates), in `matrices/hicstuff_<prefix>/`.
+  Needs the 4DN pairs header: columns **chr1 / chr2** (our first files used
+  chrom1 / chrom2: pairtools sort failed and the PCR-free file was empty) and
+  `#chromsize` lines → fixed in the classifier and reattribute_v2.
+  Yeast group1: 1.81M pairs discarded (uncuts 1.39M, loops 0.41M, weirds
+  10.5k), 5% PCR duplicates, 5.59M remaining; 5.5 min.
+  **Same thresholds for both files:** hicstuff estimates its uncut / loop
+  thresholds per library; on yeast it chose 19 / 25 fragments on unrescued
+  but 8 / 10 on rescued, so the rescued pairs were less filtered (1.23M uncuts
+  removed vs 1.39M from a file they contain) and before / after was biased.
+  Now the thresholds estimated on unrescued are applied to rescued
+  (`hicstuff pipeline --duplicates`, then `hicstuff filter --thresholds u-l`).
+- cooler matrices at bin_size (`cooler cload pairs`) + ICE (`cooler balance`),
+  mad-max 5 for unrescued, 1000 for rescued (as v1: the reconstructed repeats
+  must not be filtered out again).
+- `plot_before_after`: v1-style pages (hicberg/plot.py plot_matrix), one page
+  per pair of chromosomes (intra only if > 30 chromosomes or `--intra_only`),
+  `matrices_raw.pdf` and `matrices_normalised.pdf` (ICE): left unrescued map
+  + **mappability**, GC; right rescued map + coverage before / after (median
+  of before dashed, legend outside on the right), **number of Hi-C restriction
+  sites per bin** (bars, `--enzyme`, e.g. DpnII + HinfI; GC for Micro-C): the
+  bins that stay poor in reads after rescue are bins with few sites (yeast,
+  2 kb: bins with 0-5 sites have 0.49× the median coverage; the 11 bins below
+  25 % of the median have 0 site, vs 12 for a typical bin; Spearman 0.46).
+  Intra colour scale (raw and ICE): log10 from the 1st percentile of the non-zero
+  pixels lowered by 0.5 × the fraction of empty pixels (sparse yeast 2 kb maps,
+  60-70 % empty: ≈ -0.33 in raw; dense chrMT: tight scale, ≈ -2.4 to -0.7 in
+  ICE as in v1; a fixed offset of 1 washed the far field into orange) to the
+  99.97th percentile (95th / 99th / 99.9th
+  saturated the first diagonals, the max depends on outlier pixels). At 2 kb
+  most non-zero raw pixels hold a single contact (log10 = 0): with vmin = 0
+  (v1) they were white like the empty pixels and the far field / domains
+  vanished; the v1 vmax 3.5 also washed the maps out. Trans: raw 0-99.5th
+  percentile, ICE 5th-99th. Tracks without top / right frame; titles give the number of
+  contacts of each block (upper triangle in intra). The normalised
+  maps remove the copy-number effect (rDNA, 2µ) that dominates the raw ones.
+
 ## Module 3: reattribute_v2.py (first version done)
 
 ```bash

@@ -319,15 +319,19 @@ def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rat
     return stats
 
 
-PAIRS_HEADER = ("## pairs format v1.0\n"
-                "#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2 n_candidates1 n_candidates2\n")
+def pairs_header(chrom_sizes, extra_columns=()):
+    """4DN pairs header: #chromsize lines and chr1 / chr2 column names (pairtools, hicstuff)."""
+    lines = ["## pairs format v1.0"] + [f"#chromsize: {c} {L}" for c, L in chrom_sizes.items()]
+    lines.append("#columns: readID chr1 pos1 chr2 pos2 strand1 strand2"
+                 + "".join(f" {c}" for c in extra_columns))
+    return "\n".join(lines) + "\n"
 
 
-def merge_pairs(unrescued, predicted, out_path):
+def merge_pairs(unrescued, predicted, out_path, chrom_sizes):
     """rescued.pairs = unrescued.pairs + predicted.pairs (7 standard columns). Returns the number of pairs."""
     n = 0
     with open(out_path, "w") as out:
-        out.write("## pairs format v1.0\n#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+        out.write(pairs_header(chrom_sizes))
         for path in (unrescued, predicted):
             with open(path) as fh:
                 for line in fh:
@@ -413,8 +417,9 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
     else:
         results = [reattribute_chunk(j) for j in jobs]
 
+    sizes = np.load(Path(stats_dir) / st.CHROM_SIZES, allow_pickle=True).item()
     with open(output_dir / "predicted.pairs", "w") as out:
-        out.write(PAIRS_HEADER)
+        out.write(pairs_header(sizes, ("n_candidates1", "n_candidates2")))
         for j in jobs:
             with open(j["out"]) as fh:
                 for line in fh:
@@ -423,7 +428,7 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
 
     unrescued = Path(classifier_dir) / "unrescued.pairs" if classifier_dir else None
     if unrescued is not None and unrescued.is_file():
-        n_res = merge_pairs(unrescued, output_dir / "predicted.pairs", output_dir / "rescued.pairs")
+        n_res = merge_pairs(unrescued, output_dir / "predicted.pairs", output_dir / "rescued.pairs", sizes)
         print(f"rescued.pairs: {n_res:,} pairs (unrescued + predicted)")
 
     total = {k: sum(r[k] for r in results) for k in results[0] if k != "seconds"}

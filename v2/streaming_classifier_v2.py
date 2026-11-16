@@ -311,8 +311,12 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
 
     # unrescued.pairs header (pairtools format)
     f_pairs = open(output_dir / "unrescued.pairs", 'w')
+    # 4DN pairs format (chr1 / chr2 column names and #chromsize lines are
+    # required by pairtools / hicstuff)
     f_pairs.write("## pairs format v1.0\n")
-    f_pairs.write("#columns: readID chrom1 pos1 chrom2 pos2 strand1 strand2\n")
+    for chrom, length in sam_chrom_sizes(sam1_path).items():
+        f_pairs.write(f"#chromsize: {chrom} {length}\n")
+    f_pairs.write("#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n")
 
     # group2 FASTQ chunks
     g2_r1_files = [
