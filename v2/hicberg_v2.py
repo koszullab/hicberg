@@ -4,7 +4,8 @@ hicberg_v2.py — HiCberg v2 pipeline.
 
 Stages (--start_stage / --exit_stage to run a part only):
   index        bowtie2 index of the genome (skipped if --index is given or exists)
-  mappability  GenMap theoretical mappability (k = read length; --no_mappability to skip)
+  mappability  theoretical mappability, k = read length (bowtie2 by default, or GenMap,
+               or a given bedgraph; --mappability none to skip)
   align        bowtie2 --very-sensitive-local --reorder on R1 and R2
   classify     streaming_classifier_v2: group0 / group1 (unrescued.pairs) / group2 chunks
   stats        statistics_v2: P(s), coverage, density + checkpoint plots
@@ -79,8 +80,15 @@ def main():
     p.add_argument("--circular", default="", help="Circular chromosomes, e.g. plasmid2micron,chrMT")
     p.add_argument("--bin_size", type=int, default=2000)
     # mappability
-    p.add_argument("--no_mappability", action="store_true", help="Do not use GenMap (trapezoid areas)")
+    p.add_argument("--mappability", default="bowtie2",
+                   help="bowtie2 (default: k-mers of the read length aligned like the reads), "
+                        "genmap, none (trapezoid areas), or the path of an existing bedgraph")
+    p.add_argument("--mappability_step", type=int, default=10,
+                   help="bowtie2 mappability: one k-mer every STEP bp (default 10)")
     p.add_argument("--genmap_errors", type=int, default=2)
+    p.add_argument("--repeat_links_step", type=int, default=50,
+                   help="Links between the copies of the repeats (arcs left of the maps): one "
+                        "k-mer every STEP bp aligned with bowtie2 -k 100 (default 50; 0 = no links)")
     # statistics
     p.add_argument("--density_n_min", default="200", help="Density threshold, or 'auto'")
     # rescue
@@ -127,14 +135,42 @@ def main():
                        check=True, stdout=subprocess.DEVNULL)
 
     # --- mappability ---
+    # k-mer length = read length (longest of the first reads of R1)
     bedgraph = None
-    if not args.no_mappability:
+    if args.mappability not in ("bowtie2", "genmap", "none"):
+        bedgraph = Path(args.mappability)
+        if not bedgraph.is_file():
+            p.error(f"--mappability: {bedgraph} not found")
+    elif args.mappability != "none":
         k = read_length(args.fastq1)
-        bedgraph = dirs["mappability"] / f"genmap_K{k}_E{args.genmap_errors}.bedgraph"
+        if args.mappability == "bowtie2":
+            bedgraph = dirs["mappability"] / f"bowtie2_K{k}_S{args.mappability_step}.bedgraph"
+        else:
+            bedgraph = dirs["mappability"] / f"genmap_K{k}_E{args.genmap_errors}.bedgraph"
         if run_stage("mappability", args) and not bedgraph.is_file():
             import mappability_v2 as mp
-            log(f"GenMap mappability (k = {k}, {args.genmap_errors} errors) ...")
-            bedgraph = mp.run_genmap(args.genome, dirs["mappability"], k, args.genmap_errors, args.cpus)
+            if args.mappability == "bowtie2":
+                if not (Path(index + ".1.bt2").is_file() or Path(index + ".1.bt2l").is_file()):
+                    p.error(f"bowtie2 index {index} not found (needed by the mappability)")
+                log(f"bowtie2 mappability (k = {k}, one k-mer every {args.mappability_step} bp) ...")
+                bedgraph = mp.bowtie2_mappability(args.genome, index, dirs["mappability"], k,
+                                                  args.mappability_step, args.cpus)
+            else:
+                log(f"GenMap mappability (k = {k}, {args.genmap_errors} errors) ...")
+                bedgraph = mp.run_genmap(args.genome, dirs["mappability"], k, args.genmap_errors,
+                                         args.cpus)
+
+    # repeat links (which repeated sequences go together), for the arcs of the plots
+    links_file = None
+    if args.repeat_links_step > 0:
+        k = read_length(args.fastq1)
+        links_file = dirs["mappability"] / f"repeat_links_K{k}_S{args.repeat_links_step}.tsv"
+        if run_stage("mappability", args) and not links_file.is_file():
+            import mappability_v2 as mp
+            log(f"Repeat links (k = {k}, one k-mer every {args.repeat_links_step} bp) ...")
+            links_file, summary = mp.repeat_links(args.genome, index, dirs["mappability"], k,
+                                                  args.repeat_links_step, threads=args.cpus)
+            log(f"  {summary}")
 
     # --- align ---
     sam1, sam2 = dirs["alignments"] / "1.sam", dirs["alignments"] / "2.sam"
@@ -207,7 +243,8 @@ def main():
         mx.plot_before_after(cool_u, cool_r, dirs["matrices"] / "plots", mappability=mapp, gc=gc,
                              sites=sites, enzyme_label=f"{args.enzyme} sites" if args.enzyme else "",
                              intra_only=args.intra_only or len(sizes) > 30,
-                             labels=(f"unrescued{suffix}", f"rescued{suffix}"))
+                             labels=(f"unrescued{suffix}", f"rescued{suffix}"),
+                             repeat_links=links_file if links_file and links_file.is_file() else None)
 
     log(f"Done in {(time.time() - t_start) / 60:.1f} min — {out}")
 

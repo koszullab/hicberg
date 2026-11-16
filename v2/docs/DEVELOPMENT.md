@@ -613,8 +613,9 @@ python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 \
 # checkpoint: --exit_stage stats, check out/statistics/plots, then --start_stage rescue
 ```
 
-Stages: `index` (bowtie2-build unless `--index`) → `mappability` (GenMap,
-k = read length read from R1, `--no_mappability`) → `align` (bowtie2
+Stages: `index` (bowtie2-build unless `--index`) → `mappability` (k = read
+length read from R1; `--mappability bowtie2` (default) | `genmap` | `none` |
+path of a bedgraph; + repeat links, `--repeat_links_step`) → `align` (bowtie2
 --very-sensitive-local --reorder, SAM deleted after classify unless
 `--keep_sam`) → `classify` → `stats` (+ checkpoint plots) → `rescue` →
 `matrices`. Chromosome sizes from the FASTA (`out/chrom.sizes`).
@@ -652,7 +653,7 @@ Group2 chunks = cpus / 4, re-aligned and re-attributed in parallel.
 - `plot_before_after`: v1-style pages (hicberg/plot.py plot_matrix), one page
   per pair of chromosomes (intra only if > 30 chromosomes or `--intra_only`),
   `matrices_raw.pdf` and `matrices_normalised.pdf` (ICE): left unrescued map
-  + **mappability**, GC; right rescued map + coverage before / after (median
+  + GC, **Mappability** (shorter track); right rescued map + coverage before / after (median
   of before dashed, legend outside on the right), **number of Hi-C restriction
   sites per bin** (bars, `--enzyme`, e.g. DpnII + HinfI; GC for Micro-C): the
   bins that stay poor in reads after rescue are bins with few sites (yeast,
@@ -891,3 +892,57 @@ re-alignment the 2,325 group2 R1 reads that were unique all come back on the
 same strand and position. The rescued results above (maps, fidelity,
 modes) used the wrong strands; at 2 kb they are barely affected, but the
 pipeline must be re-run from the alignment (SAMs not kept).
+
+### Mappability with bowtie2 (GenMap optional) and repeat links (2026-11-16)
+
+GenMap is no longer actively developed: the default mappability is now
+computed with the aligner of the pipeline (`mappability_v2.bowtie2_mappability`).
+One k-mer (k = read length) every `step` bp (default 10) is aligned with
+bowtie2 --very-sensitive-local, streamed (stdin / stdout, no file); a k-mer is
+mappable if it aligns without XS tag, i.e. exactly the criterion that sends a
+read to group1. Bedgraph with score 1 over [p, p + step): same format as the
+GenMap one, read by `binned_unique_fraction`. Options: `--mappability
+bowtie2|genmap|none|<bedgraph>`, `--mappability_step`.
+
+Yeast (k 35) vs GenMap K35 E2: mappable fraction 91.29 % vs 91.55 %; 2 kb
+bins r = 0.999 (21 / 6139 bins differ by > 0.1, all on chrMT: AT-rich, local
+mode finds partial second alignments → XS, as for the real reads); 100 bp
+bins r = 0.994. Step 10 vs step 1: r = 1.0000 at 2 kb, no bin differs; 34 s
+vs 314 s (6 threads). Mouse benchmark (mhaESC T2T, 2.87 Gb, 1 M random
+k-mers, machine loaded): k 35 → 55 k k-mers/s (8 threads), k 100 → 15 k/s
+(8 threads), 21 k/s (16 threads); whole genome at step 10: ~1.5 h (k 35),
+~2.5-4 h (k 100), once per genome and read length. Note: in local mode 36 %
+(k 35) but 43 % (k 100) of the mouse k-mers have an XS: a partial hit in a
+repeat (Alu / LINE) is enough. For human Micro-C a large part of the reads
+will go to group2; a threshold on AS - XS may be needed.
+
+**Repeat links** (`mappability_v2.repeat_links`): one k-mer every 50 bp
+aligned with bowtie2 -k 100; copies with AS >= best - 8 (≤ ~1 mismatch); for
+a k-mer with 2-99 copies, a link from its 1 kb bin to the bin of each other
+copy, with the relative orientation (+ direct / tandem, - inverted); k-mers
+with >= 100 copies are saturated (not linked). First with -k 20: the Ty
+elements of the chrXII right arm (614 / 672 / 840 kb: 37-40 copies per
+k-mer) were saturated and had no arc → -k 100. TSV
+`repeat_links_K{k}_S{step}.tsv` (chrom1 start1 chrom2 start2 orientation
+n_kmers). Yeast: 3 s; 245 k k-mers, 19.3 k linked, 353 saturated; rDNA
+links "+" with the 9.1 kb period, chrII right end "-" (500 / 506 k-mers:
+the palindrome). **Families** (`repeat_families`, at the bin size of the
+maps): graph bins ↔ links (≥ 3 k-mers, weighted by the shared k-mers),
+Louvain communities (networkx, seed 0; connected components as fallback:
+with -k 100 they chained Ty and subtelomeres into one family of 506 bins),
+ranked by size, described automatically: tandem (one chromosome, compact),
+subtelomeric (≥ 60 % of the bins within 30 kb of an end), dispersed. Yeast at
+2 kb: F1 dispersed (16 chr, 120 bins), F2 / F3 subtelomeric (16 chr, 78 / 61
+bins), F4-F6 dispersed (13-14 chr: Ty sub-families), F8 tandem chrXII
+440-512 kb (rDNA), ...
+Written to `plots/repeat_families.tsv` and `repeat_family_bins.tsv`.
+Plotted as arcs left of the unrescued map, **one colour per family** (the 12
+largest, others grey; the orientation stays in the links file), width ∝
+sqrt(distance), line width ∝ log(k-mers), ≥ 3 k-mers per
+pair of map bins, at most 3000 arcs); trans pages: ticks on a strip left of
+the map (positions of the row chromosome with a copy on the column one) and
+on a strip above it (positions of the column chromosome), same colours; the
+maps themselves stay free of annotations (open circles at the pairs of
+copies were tried and dropped). Shows at once the rDNA (tandem
+cluster), the chrII palindrome, the subtelomeres (chromosome-end to
+chromosome-end) and the Ty elements (long arcs).

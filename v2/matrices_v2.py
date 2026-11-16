@@ -11,7 +11,7 @@ Last step of the pipeline: contact matrices before / after re-attribution.
      that the reconstructed repeats are not filtered out again
   3. plot_before_after(): v1-style plots (hicberg/plot.py plot_matrix), one
      page per pair of chromosomes, raw and normalised (balanced) PDFs:
-        left : unrescued map; mappability, GC content
+        left : unrescued map; GC content, mappability
         right: rescued map; coverage before / after, Hi-C restriction sites per
                bin (GC content for Micro-C)
 """
@@ -239,13 +239,17 @@ def restriction_sites(genome, chrom_sizes, bin_size, enzymes):
 # ---------------------------------------------------------------------------
 
 def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None, gc=None,
-                      sites=None, enzyme_label="restriction sites", chrom_pairs=None, intra_only=False, vmin_raw=None, vmax_raw=None,
-                      labels=("unrescued", "rescued")):
+                      sites=None, enzyme_label="restriction sites", chrom_pairs=None,
+                      intra_only=False, vmin_raw=None, vmax_raw=None,
+                      labels=("unrescued", "rescued"), repeat_links=None, min_link_kmers=3,
+                      max_arcs=3000):
     """
     Two multi-page PDFs (matrices_raw.pdf, matrices_normalised.pdf), one page
     per pair of chromosomes (all pairs, or intra only, or chrom_pairs), as in
     v1 (hicberg/plot.py plot_matrix):
-      left : unrescued map; tracks: mappability, GC
+      left : unrescued map; tracks: GC, mappability (shorter); arcs on the left between
+             the copies of the repeated sequences (repeat_links, from
+             mappability_v2.repeat_links)
       right: rescued map; tracks: coverage before / after (+ median), restriction
              sites per bin (bars; GC if sites is None, e.g. Micro-C)
     Coverage = column sums of the unbalanced block (as v1). mappability, gc:
@@ -264,6 +268,109 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
     cmap.set_bad("white")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    links = None
+    if repeat_links is not None:
+        from mappability_v2 import read_repeat_links, repeat_families
+        links = read_repeat_links(repeat_links) if not hasattr(repeat_links, "columns") \
+            else repeat_links
+        links = links[links["n_kmers"] > 0]
+        fam_bins, families = repeat_families(links, unres.binsize, min_link_kmers,
+                                             dict(unres.chromsizes))
+        families.to_csv(output_dir / "repeat_families.tsv", sep="\t", index=False)
+        fam_bins.to_csv(output_dir / "repeat_family_bins.tsv", sep="\t", index=False)
+        family_of = {(c, int(st) // unres.binsize): int(f)
+                     for c, st, f in zip(fam_bins["chrom"], fam_bins["start"], fam_bins["family"])}
+        family_label = dict(zip(families["family"].astype(int), families["label"]))
+        # the 12 largest families get their own colour (tab10 without its grey,
+        # + 3), the others grey
+        palette = [c for k, c in enumerate(plt.get_cmap("tab10").colors) if k != 7] + \
+            [(0.0, 0.5, 0.5), (0.1, 0.1, 0.45), (0.85, 0.65, 0.0)]
+
+        def family_color(f):
+            return palette[f - 1] if 1 <= f <= len(palette) else (0.6, 0.6, 0.6)
+
+    def page_links(a, b):
+        """
+        Links of the page at the bin size of the maps:
+        (pos1_kb, pos2_kb, family, n_kmers).
+        """
+        sel = links[(links["chrom1"] == a) & (links["chrom2"] == b)]
+        if sel.empty:
+            return np.zeros((0, 4))
+        b1 = sel["start1"].to_numpy() // unres.binsize
+        b2 = sel["start2"].to_numpy() // unres.binsize
+        n = sel["n_kmers"].to_numpy()
+        if a == b:                                       # one arc per pair of bins
+            keep = b1 < b2
+            b1, b2, n = b1[keep], b2[keep], n[keep]
+        key = np.stack([b1, b2], axis=1)
+        if not len(key):
+            return np.zeros((0, 4))
+        uniq, inv = np.unique(key, axis=0, return_inverse=True)
+        tot = np.bincount(inv.ravel(), weights=n)
+        keep = tot >= min_link_kmers
+        uniq, tot = uniq[keep], tot[keep]
+        if len(tot) > max_arcs:
+            top_ = np.argsort(-tot)[:max_arcs]
+            uniq, tot = uniq[top_], tot[top_]
+        fam = np.array([family_of.get((a, int(x)), 0) for x in uniq[:, 0]], dtype=np.float64)
+        out = np.column_stack([(uniq[:, 0] + 0.5) * kb, (uniq[:, 1] + 0.5) * kb, fam, tot])
+        return out[np.argsort(-out[:, 2])] if len(out) else out     # largest families on top
+
+    def link_widths(arcs):
+        return 0.3 + 0.6 * np.log10(arcs[:, 3]) / max(np.log10(arcs[:, 3].max()), 1) \
+            if len(arcs) else np.zeros(0)
+
+    def family_legend(ax, arcs, loc, anchor):
+        fams = sorted({int(f) for f in arcs[:, 2]} - {0})
+        main = [f for f in fams if f <= len(palette)]
+        for f in main:
+            ax.plot([], [], color=family_color(f), label=family_label.get(f, f"F{f}"))
+        if len(main) < len(fams):
+            ax.plot([], [], color=family_color(0), label="other families")
+        if fams:
+            ax.legend(fontsize=5, loc=loc, bbox_to_anchor=anchor, frameon=False)
+
+    def draw_links(ax, arcs, intra, length_kb):
+        """
+        Strip left of the map (y = row chromosome), one colour per repeat
+        family (repeat_families: the 10 largest, others grey).
+        Intra: arcs between the two copies, width ∝ sqrt(distance), line width
+        ∝ log(number of shared k-mers). Trans: ticks at the positions of the
+        row chromosome that have a copy on the column chromosome.
+        """
+        from matplotlib.patches import Arc
+        ax.set_xlim(1.05, 0)
+        lw = link_widths(arcs)
+        for k, (y1, y2, f, n) in enumerate(arcs):
+            if intra:
+                d = abs(y2 - y1)
+                w = np.sqrt(d / length_kb)
+                ax.add_patch(Arc((0, (y1 + y2) / 2), 2 * w, d, theta1=270, theta2=90,
+                                 color=family_color(int(f)), lw=lw[k], alpha=0.7))
+            else:
+                ax.plot([0, 0.35], [y1, y1], color=family_color(int(f)), lw=lw[k], alpha=0.7)
+        ax.set_title("repeats", fontsize=7)
+        ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+        for side_ in ("top", "left", "bottom"):
+            ax.spines[side_].set_visible(False)
+        family_legend(ax, arcs, "upper left", (-0.15, -0.02))
+
+    def draw_links_trans(ax_top, arcs):
+        """
+        Trans pages: ticks on the strip above the map at the positions of the
+        column chromosome that have a copy on the row chromosome (the left
+        strip has those of the row chromosome); same family colours. The map
+        itself stays free of annotations.
+        """
+        ax_top.set_ylim(0, 1.05)
+        lw = link_widths(arcs)
+        for k, (y1, x2, f, n) in enumerate(arcs):
+            ax_top.plot([x2, x2], [0, 0.35], color=family_color(int(f)), lw=lw[k], alpha=0.7)
+        ax_top.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+        for side_ in ("top", "left", "right"):
+            ax_top.spines[side_].set_visible(False)
 
     def track(values, n):
         if values is None:
@@ -311,7 +418,14 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         side = 5.0
         h_map = float(np.clip(side * m_u.shape[0] / nb, 0.3 * side, 1.6 * side))
         t_h, gap, vgap, left, right, bottom, top, cb = 0.9, 1.6, 0.35, 0.9, 1.5, 0.7, 0.8, 0.15
-        n_tracks = 2                    # left: mappability, GC; right: coverage before / after, sites (or GC)
+        arcs = page_links(a, b) if links is not None else None
+        arc_w, arc_h = 0.9, 0.45
+        if arcs is not None:
+            left += arc_w + 0.1
+            if a != b:                                  # strip above the left map
+                top += arc_h + 0.1
+        n_tracks = 2                    # left: GC, mappability; right: coverage before / after, sites (or GC)
+        t_h2 = 0.55                     # height of the 2nd tracks (mappability, sites)
         fig_w = left + 2 * side + gap + right
         fig_h = bottom + n_tracks * (t_h + vgap) + h_map + top
         fig = plt.figure(figsize=(fig_w, fig_h))
@@ -325,30 +439,40 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
             ax = fig.add_axes(frac(x0, map_y, side, h_map))
             im = ax.imshow(np.ma.masked_invalid(z), cmap=cmap, vmin=vmin, vmax=vmax,
                            interpolation="none", extent=extent, aspect="auto")
+            pad = 6 + (72 * (arc_h + 0.1) if arcs is not None and a != b else 0)
             ax.set_title(f"{lab} — {a} × {b} — {kind}, {kb:g} kb bins\n"
-                         f"{n_contacts[col]:,} contacts", fontsize=9)
+                         f"{n_contacts[col]:,} contacts", fontsize=9, pad=pad)
             ax.set_ylabel(f"{a} (kb)", fontsize=8)
             ax.tick_params(labelbottom=False, labelsize=7)
             cax = fig.add_axes(frac(x0 + side + 0.1, map_y, cb, h_map))
             fig.colorbar(im, cax=cax, label="log10 contacts")
+            if col == 0 and arcs is not None:
+                arc_ax = fig.add_axes(frac(x0 - 0.8 - arc_w, map_y, arc_w, h_map), sharey=ax)
+                draw_links(arc_ax, arcs, a == b, m_u.shape[0] * kb)
+                if a != b:
+                    top_ax = fig.add_axes(frac(x0, map_y + h_map + 0.05, side, arc_h), sharex=ax)
+                    draw_links_trans(top_ax, arcs)
 
             tracks = []
-            if col == 0:
-                mapp = track(mappability.get(b) if mappability else None, nb)
-                if mapp is not None:
-                    tracks.append(("mappability", [(mapp, "grey", "fill")], None))
-            else:
-                tracks.append(("coverage before / after",
-                               [(cov_u, "royalblue", "before"), (cov_r, "limegreen", "after")], med))
             rs = track(sites.get(b) if sites else None, nb)
             g = track(gc.get(b) if gc else None, nb)
-            if col == 1 and rs is not None:
-                tracks.append((enzyme_label, [(rs, "royalblue", "bar")], None))
-            elif g is not None:
-                tracks.append(("GC content", [(g, "orange", None)], None))
+            if col == 0:                        # left: GC content, then mappability (shorter)
+                if g is not None:
+                    tracks.append(("GC content", [(g, "orange", None)], None))
+                mapp = track(mappability.get(b) if mappability else None, nb)
+                if mapp is not None:
+                    tracks.append(("Mappability", [(mapp, "grey", "fill")], None))
+            else:                               # right: coverage, then sites (or GC)
+                tracks.append(("Coverage before / after",
+                               [(cov_u, "royalblue", "before"), (cov_r, "limegreen", "after")], med))
+                if rs is not None:
+                    tracks.append((enzyme_label, [(rs, "royalblue", "bar")], None))
+                elif g is not None:
+                    tracks.append(("GC content", [(g, "orange", None)], None))
             for k, (title, series, median) in enumerate(tracks):
-                y0 = map_y - (k + 1) * (t_h + vgap)
-                tr = fig.add_axes(frac(x0, y0, side, t_h), sharex=ax)
+                h = t_h2 if k == 1 else t_h      # 2nd track shorter (mappability / sites)
+                y0 = map_y - k * (t_h + vgap) - vgap - h
+                tr = fig.add_axes(frac(x0, y0, side, h), sharex=ax)
                 for values, color, label in series:
                     if label == "fill":
                         tr.fill_between(x, values, step="mid", color=color, alpha=0.6, lw=0)
