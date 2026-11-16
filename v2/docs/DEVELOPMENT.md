@@ -946,3 +946,54 @@ maps themselves stay free of annotations (open circles at the pairs of
 copies were tried and dropped). Shows at once the rDNA (tandem
 cluster), the chrII palindrome, the subtelomeres (chromosome-end to
 chromosome-end) and the Ty elements (long arcs).
+
+### Large / sparse genomes: density bin, shrinkage, coverage threshold (2026-11-16)
+
+Mosquito (Culex quinquefasciatus + Wolbachia wPipMtq, 575 Mb, 59 sequences;
+library MM265a, 37 M pairs of 35 bp): only 32 % of the reads align, 85 % of
+the others align on yeast (same dual index on all reads: the yeast library
+probably got the same index, or yeast DNA was in the tube; to be re-run on a
+mosquito + Wolbachia + yeast genome, with the yeast-mosquito chimeric pairs
+as a test of when they were mixed). Wolbachia gets 23.6 % of the aligned
+reads (1.4 Mb). 43.6 % of the genome uniquely mappable (k 35); group1 3.3 M
+pairs (8.8 %), group2 6.6 M (17.8 %).
+
+Scaling changes:
+- `--density_bin_size` (statistics / pipeline, default auto) separate from
+  the coverage bin: dense blocks of a 225 Mb chromosome at 2 kb would need
+  ~1.3 TB. Memory criterion (`auto_density_bin_size`): 100 bytes per cell of
+  the largest block (block_density measured ~52 bytes / cell, x2) <= half of
+  MemAvailable. Density stored in float32, with its bin size
+  (`density_bin_size.npy`) and its mask / mappable weights at that bin
+  (`density_mask.npy`); reattribute_v2 looks the density up at its own bin.
+- Before / after plots: `cooler coarsen` to `--plot_bin_size` (auto: largest
+  plotted sequence <= 3000 bins: yeast 2 kb, mosquito 100 kb), sequences
+  `--plot_chroms` (auto: all if <= 30, else those >= 1 Mb, at most 20);
+  density plots of the statistics restricted to them and the genome-wide
+  density downsampled block by block (the full matrix does not fit).
+- P(s) pages of sequences without any pair are skipped (crashed on small
+  unmappable scaffolds).
+
+Problems seen on the mosquito statistics and fixes:
+- Coverage: bins kept if mappable fraction >= 0.8 → only 20 % of the
+  mosquito 2 kb bins (median fraction 0.44), the rest interpolated. Default
+  now 0.3 (61 % kept): the coverage is already divided by the mappable
+  length, a 30 % mappable bin is unbiased, only noisier.
+- Density noise: 0.006 contact per far-field pixel at 25 kb (chr1), the
+  45-bin window held ~12 contacts for n_min = 200; the largest-window
+  nan-mean of obs / exp gave 0 and values up to 230 (stripes).
+  (a) `data_density_bin_size`: from the intra P(s) counts, contact density
+  per position pair rho(d) = N(d) / ((L - d) Δd); a 45 × 45 window of bins b
+  holds ~ 45² rho b² contacts; smallest nice b with <= 5 % of the intra
+  contacts in windows below n_min. Yeast: 0 % at 2 kb → 2 kb; mosquito:
+  21 % at 2 kb, 7 % at 25 kb, 4.8 % at 50 kb → 50 kb. The density bin is the
+  coarser of the memory and data criteria.
+  (b) Shrinkage in `adaptive_filter` where even the largest window has
+  < n_min contacts: (O + δ) / (E + δ), δ = n_min - O (the missing contacts
+  are taken at density 1, i.e. P(s) only); continuous at O = n_min.
+Yeast check (full AC1 unrescued, 36 M pairs): density bin stays 2 kb (0 %
+fallback); kept coverage bins 5517 → 5721, coverage r = 0.997 (234 / 6139
+bins differ by > 10 %, mostly around unmappable regions); density log2 r =
+0.991 (intra median) / 0.995 (trans median) vs the previous maps, the
+changes are in the small sparse blocks (2µ × 2µ 4 × 4 bins, chrMT trans:
+shrunk towards 1).

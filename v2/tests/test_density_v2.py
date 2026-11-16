@@ -214,3 +214,33 @@ def test_reproducible_n_min_on_pure_noise_and_structure():
     rate[blocks] = 20.0
     best, part = dn.reproducible_n_min(halves_from(rate), sizes, 100, grid=(10, 50, 400), target=0.8)
     assert best["trans"] < 400 and part["trans"][10] > 0.8
+
+
+def test_adaptive_filter_shrinks_sparse_pixels_towards_one():
+    rng = np.random.default_rng(0)
+    n = 60
+    expected = np.full((n, n), 0.01)                       # 0.01 contact expected per pixel
+    counts = rng.poisson(expected * 3).astype(float)       # 3× enriched but very sparse
+    z = np.divide(counts, expected)
+    old, _ = dn.adaptive_filter(z, counts, windows=(1, 5), n_min=200)
+    new, chosen = dn.adaptive_filter(z, counts, windows=(1, 5), n_min=200, expected=expected)
+    assert np.nanmax(old) > 10                             # noise of the previous fallback
+    assert (chosen == 0).all()                             # no window reaches 200 contacts
+    assert 0.9 < new.min() and new.max() < 1.2             # shrunk towards 1
+    # dense: same as before (n_min reached), shrinkage not used
+    dense = rng.poisson(np.full((n, n), 50.0)).astype(float)
+    a, _ = dn.adaptive_filter(dense / 50, dense, windows=(1, 5), n_min=200)
+    b, _ = dn.adaptive_filter(dense / 50, dense, windows=(1, 5), n_min=200,
+                              expected=np.full((n, n), 50.0))
+    np.testing.assert_allclose(a, b)
+
+
+def test_data_density_bin_size():
+    L = 10_000_000
+    xs = {"c": np.array([0, 1_000, 10_000, 100_000, 1_000_000])}
+    dense = {"c": np.array([[1e6, 1e6, 1e6, 1e6, 1e6]] * 4)}
+    sparse_ = {"c": np.array([[1e2, 1e2, 1e2, 1e1, 1e1]] * 4)}
+    b, fb = dn.data_density_bin_size(dense, xs, {"c": L}, 2000)
+    assert b == 2000 and fb == 0
+    b2, fb2 = dn.data_density_bin_size(sparse_, xs, {"c": L}, 2000)
+    assert b2 > 2000 and fb2 <= 0.05

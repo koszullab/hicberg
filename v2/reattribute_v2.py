@@ -157,6 +157,9 @@ class Laws:
         if mode == "full":
             self.density = load(st.DENSITY_MAP)
             self.dens_n = np.array([self.density[(c, c)].shape[0] for c in self.names])
+            # the density may be binned more coarsely than the coverage (large genomes)
+            self.dens_bin = int(np.load(d / st.DENSITY_BIN)) if (d / st.DENSITY_BIN).is_file() \
+                else bin_size
 
     def ps(self, c1, p1, r1, c2, p2, r2):
         """P(s) of each combination (intra: by orientation and distance; trans: trans P(s))."""
@@ -177,8 +180,8 @@ class Laws:
 
     def density_of(self, c1, p1, c2, p2):
         """Density of each combination; blocks are stored for chromosome a <= b."""
-        b1 = np.clip((p1 - 1) // self.bin_size, 0, self.dens_n[c1] - 1)
-        b2 = np.clip((p2 - 1) // self.bin_size, 0, self.dens_n[c2] - 1)
+        b1 = np.clip((p1 - 1) // self.dens_bin, 0, self.dens_n[c1] - 1)
+        b2 = np.clip((p2 - 1) // self.dens_bin, 0, self.dens_n[c2] - 1)
         swap = c1 > c2
         ca, cb = np.where(swap, c2, c1), np.where(swap, c1, c2)
         ba, bb = np.where(swap, b2, b1), np.where(swap, b1, b2)

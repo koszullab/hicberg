@@ -103,6 +103,16 @@ def main():
     p.add_argument("--enzyme", default=None, help="Restriction enzyme(s) of the Hi-C, e.g. DpnII,HinfI "
                                                   "(Micro-C: 'mnase' = virtual 100 bp fragments, or a size in bp); used by hicstuff "
                                                   "and for the sites-per-bin track of the plots")
+    p.add_argument("--density_bin_size", default="auto",
+                   help="Bin size of the 2D density: 'auto' (default: --bin_size if it fits in "
+                        "half of the available memory, else coarser, e.g. 25 kb for a 225 Mb "
+                        "chromosome with 16 GB free) or a value in bp")
+    p.add_argument("--plot_bin_size", default="auto",
+                   help="Bin size of the before / after plots: 'auto' (largest plotted "
+                        "chromosome <= 3000 bins) or a value in bp (multiple of --bin_size)")
+    p.add_argument("--plot_chroms", default="auto",
+                   help="Comma-separated sequences of the before / after plots; 'auto': all if "
+                        "<= 30 sequences, else those >= 1 Mb (at most 20)")
     p.add_argument("--intra_only", action="store_true",
                    help="Before / after plots for intra-chromosomal maps only (default if > 30 chromosomes)")
     p.add_argument("--keep_sam", action="store_true", help="Keep the SAM files of the first alignment")
@@ -124,6 +134,18 @@ def main():
         chrom_sizes_file.write_text("".join(f"{c}\t{L}\n" for c, L in sizes.items()))
     sizes = {l.split()[0]: int(l.split()[1]) for l in chrom_sizes_file.read_text().splitlines()}
     log(f"{len(sizes)} chromosomes, {sum(sizes.values()):,} bp")
+
+    plot_chroms = None
+    if run_stage("stats", args) or run_stage("matrices", args):
+        import matrices_v2 as mx
+        plot_chroms = mx.auto_plot_chroms(sizes) if args.plot_chroms == "auto" else \
+            [c.strip() for c in args.plot_chroms.split(",") if c.strip()]
+        unknown = set(plot_chroms) - set(sizes)
+        if unknown:
+            p.error(f"--plot_chroms: unknown sequences {sorted(unknown)}")
+        if len(plot_chroms) < len(sizes):
+            log(f"Plots restricted to {len(plot_chroms)} of {len(sizes)} sequences: "
+                f"{', '.join(plot_chroms)}")
 
     # --- index ---
     index = args.index or str(dirs["index"] / "genome")
@@ -200,7 +222,10 @@ def main():
                                dirs["statistics"], bin_size=args.bin_size, circular=args.circular,
                                mappability=bedgraph,
                                density_n_min=args.density_n_min if args.density_n_min == "auto"
-                               else int(args.density_n_min))
+                               else int(args.density_n_min),
+                               density_bin_size=args.density_bin_size
+                               if args.density_bin_size == "auto" else int(args.density_bin_size),
+                               plot_chroms=plot_chroms)
         if args.exit_stage == "stats":
             log(f"Checkpoint: check {dirs['statistics'] / 'plots'}, then run again with "
                 f"--start_stage rescue")
@@ -234,15 +259,31 @@ def main():
                                dirs["matrices"] / f"unrescued{suffix}.cool", mad_max=5, nproc=args.cpus)
         cool_r = mx.build_cool(rescued, sizes, args.bin_size,
                                dirs["matrices"] / f"rescued{suffix}.cool", mad_max=1000, nproc=args.cpus)
+        plot_bin = mx.auto_plot_bin_size(sizes, plot_chroms, args.bin_size) \
+            if args.plot_bin_size == "auto" else int(args.plot_bin_size)
+        factor = max(1, plot_bin // args.bin_size)
+        plot_u, plot_r = cool_u, cool_r
+        if factor > 1:
+            log(f"Plots at {factor * args.bin_size / 1000:g} kb (cooler coarsen ×{factor}) ...")
+            plot_u = mx.coarsen_cool(cool_u, factor, dirs["matrices"] / f"unrescued{suffix}"
+                                     f".{factor * args.bin_size // 1000}kb.cool", 5, args.cpus)
+            plot_r = mx.coarsen_cool(cool_r, factor, dirs["matrices"] / f"rescued{suffix}"
+                                     f".{factor * args.bin_size // 1000}kb.cool", 1000, args.cpus)
         log("Before / after plots ...")
         mapp_file = dirs["statistics"] / "mappability.npy"
         mapp = np.load(mapp_file, allow_pickle=True).item() if mapp_file.is_file() else None
-        gc = mx.gc_content(args.genome, sizes, args.bin_size)
-        sites = mx.restriction_sites(args.genome, sizes, args.bin_size, args.enzyme) \
+        if mapp is not None and factor > 1:
+            mapp = {c: mx.rebin_mean(v, factor) for c, v in mapp.items()}
+        sub = {c: sizes[c] for c in plot_chroms}
+        gc = mx.gc_content(args.genome, sub, factor * args.bin_size)
+        sites = mx.restriction_sites(args.genome, sub, factor * args.bin_size, args.enzyme) \
             if args.enzyme else None
-        mx.plot_before_after(cool_u, cool_r, dirs["matrices"] / "plots", mappability=mapp, gc=gc,
+        import itertools
+        pairs = [(c, c) for c in plot_chroms] if args.intra_only else \
+            list(itertools.combinations_with_replacement(plot_chroms, 2))
+        mx.plot_before_after(plot_u, plot_r, dirs["matrices"] / "plots", mappability=mapp, gc=gc,
                              sites=sites, enzyme_label=f"{args.enzyme} sites" if args.enzyme else "",
-                             intra_only=args.intra_only or len(sizes) > 30,
+                             chrom_pairs=pairs,
                              labels=(f"unrescued{suffix}", f"rescued{suffix}"),
                              repeat_links=links_file if links_file and links_file.is_file() else None)
 

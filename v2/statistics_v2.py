@@ -53,7 +53,9 @@ COVERAGE       = "coverage.npy"    # smoothed
 PS_COUNTS      = "ps_counts.npz"   # raw counts, 4 orientations (QC)
 MAPPABILITY    = "mappability.npy" # fraction of mappable positions per coverage bin
 COVERAGE_KEPT  = "coverage_kept.npy"  # coverage bins used (others interpolated)
-DENSITY_MAP    = "density_map.npy"    # 2D density (density_v2)
+DENSITY_MAP    = "density_map.npy"    # 2D density (density_v2), float32
+DENSITY_BIN    = "density_bin_size.npy"  # bin size of the density (may differ from bin_size)
+DENSITY_MASK   = "density_mask.npy"   # {chrom: (bad bins, mappable weights)} at the density bin
 CONTACTS       = "contacts.npz"       # contact matrix at bin_size (upper triangle, scipy sparse)
 
 # Orientation codes (after ordering reads by position)
@@ -449,7 +451,7 @@ def compute_trans_ps(acc, lengths=None):
     return trans_ps
 
 
-def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.8,
+def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.3,
                      min_mappable_bp=100, min_ratio=0.0, window=10, circular=False,
                      min_anchor_bp=None):
     """
@@ -608,10 +610,10 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         ps_smoothing="pool", ps_min_pairs=100, ps_merge_distance=5000,
                         ps_pool_distance=1000,
                         plots=True, mappability=None, map_resolution=100,
-                        min_mappability=1.0, coverage_min_fraction=0.8,
+                        min_mappability=1.0, coverage_min_fraction=0.3,
                         coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None,
                         density=True, density_n_min=200, density_n_min_trans=200,
-                        density_reproducibility=0.8):
+                        density_reproducibility=0.8, density_bin_size=None, plot_chroms=None):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -619,6 +621,11 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     mappability: GenMap bedgraph (mappability_v2.py). If given, the P(s)
     areas and trans lengths only count mappable positions (fraction of
     positions with score >= min_score, binned at map_resolution).
+    density_bin_size: bin size of the 2D density (None = bin_size; "auto" =
+    density_v2.auto_density_bin_size, from the available memory): the dense
+    blocks of large genomes do not fit in memory at the coverage bin size
+    (mosquito chromosome 2, 225 Mb at 2 kb: ~1.3 TB).
+    plot_chroms: chromosomes shown in the density plots (None = all).
     """
     t0 = time.time()
     density_n_min_auto = density_n_min == "auto"
@@ -640,7 +647,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         acc.add(*chunk)
         print(f"  {acc.stats['pairs']:>13,} pairs  ({time.time() - t0:.0f} s)")
 
-    map_fine = map_lengths = map_coarse = None
+    map_fine = map_lengths = map_coarse = bg = None
     if mappability is not None:
         from mappability_v2 import read_bedgraph, binned_unique_fraction, mappable_length
         print(f"Reading mappability {mappability} ...")
@@ -685,29 +692,57 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     if density:
         import density_v2 as dn
         from scipy import sparse
-        print("Computing density map ...")
+        if density_bin_size == "auto":
+            # the coarser of: fits in memory, and enough contacts for the
+            # adaptive window (<= 5 % of the intra contacts in fallback pixels)
+            b_mem = dn.auto_density_bin_size(chrom_sizes, bin_size)
+            b_data, fb = dn.data_density_bin_size(acc.ps_counts_by_chrom(), acc.xs, chrom_sizes,
+                                                  bin_size, n_min=200 if density_n_min == "auto"
+                                                  else int(density_n_min))
+            density_bin_size = max(b_mem, b_data)
+            print(f"  density bin: memory → {b_mem / 1000:g} kb, data → {b_data / 1000:g} kb "
+                  f"({fb:.1%} of the intra contacts in fallback windows)")
+        db = int(density_bin_size or bin_size)
+        print(f"Computing density map ({db / 1000:g} kb bins) ...")
         auto = density_n_min == "auto"
-        result = dn.contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize, split_halves=auto)
+        result = dn.contact_matrix(pairs_path, chrom_sizes, db, chunksize, split_halves=auto)
         matrix, halves = result if auto else (result, None)
-        n_bins, _ = dn.genome_bins(chrom_sizes, bin_size)
+        n_bins, _ = dn.genome_bins(chrom_sizes, db)
         bad = weights = None
+        mask = {}
+        for (c, L), n in zip(chrom_sizes.items(), n_bins):
+            # a density bin is bad if none of its coverage bins is kept
+            if cov_kept is not None:
+                k = np.asarray(cov_kept[c], dtype=np.float64)
+                idx = np.minimum(np.arange(len(k)) * bin_size // db, n - 1)
+                bad_c = np.bincount(idx, weights=k, minlength=n)[:n] == 0
+            else:
+                bad_c = np.zeros(n, dtype=bool)
+            if bg is not None:
+                frac_c = binned_unique_fraction({c: bg[c]} if c in bg else {}, {c: L}, db,
+                                                min_mappability)[c][:n]
+                w_c = frac_c * np.clip(L - np.arange(n) * db, 0, db) / db
+            else:
+                w_c = None
+            mask[c] = (bad_c, w_c)
         if cov_kept is not None:
-            bad = np.concatenate([~cov_kept[c][:n] for c, n in zip(chrom_sizes, n_bins)])
-        if map_coarse is not None:
-            weights = np.concatenate([
-                map_coarse[c][:n] * np.clip(L - np.arange(n) * bin_size, 0, bin_size) / bin_size
-                for (c, L), n in zip(chrom_sizes.items(), n_bins)])
+            bad = np.concatenate([mask[c][0] for c in chrom_sizes])
+        if bg is not None:
+            weights = np.concatenate([mask[c][1] for c in chrom_sizes])
         if auto:
-            best, part = dn.reproducible_n_min(halves, chrom_sizes, bin_size, bad, weights,
+            best, part = dn.reproducible_n_min(halves, chrom_sizes, db, bad, weights,
                                                target=density_reproducibility)
             for g, d in part.items():
                 print(f"  reproducible fluctuations {g}: "
                       + "  ".join(f"{k}:{v:.0%}" for k, v in d.items()) + f" → n_min = {best[g]}")
             density_n_min, density_n_min_trans = best["intra"], best["trans"]
-        maps = dn.density_maps(matrix, chrom_sizes, bin_size, bad, method="unbiased",
+        maps = dn.density_maps(matrix, chrom_sizes, db, bad, method="unbiased",
                                smoothing="adaptive", n_min=int(density_n_min),
                                n_min_trans=int(density_n_min_trans), weights=weights)
+        maps = {k: v.astype(np.float32) for k, v in maps.items()}
         np.save(output_dir / DENSITY_MAP, maps)
+        np.save(output_dir / DENSITY_BIN, db)
+        np.save(output_dir / DENSITY_MASK, mask)
         sparse.save_npz(output_dir / CONTACTS, sparse.triu(matrix).tocsr())
 
     # --- Stats ---
@@ -746,7 +781,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     else:
         lines.append("mappability           : - (trapezoid areas)")
     lines.append("density               : " + (
-        f"unbiased, adaptive window (>= {density_n_min} contacts intra, "
+        f"{db / 1000:g} kb bins, unbiased, adaptive window (>= {density_n_min} contacts intra, "
         f">= {density_n_min_trans} trans{f', auto: >= {density_reproducibility:.0%} reproducible' if density_n_min_auto else ''})"
         + (", mappability mask and weights" if map_coarse is not None else "")
         if density else "-"))
@@ -758,7 +793,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     if plots:
         from plots_v2 import plot_all
         print()
-        plot_all(output_dir, output_dir / "plots", bin_size=bin_size)
+        plot_all(output_dir, output_dir / "plots", bin_size=bin_size, plot_chroms=plot_chroms)
         print("→ Check these plots before running the re-attribution step.")
 
 
@@ -801,9 +836,10 @@ def main():
                         help="Resolution of the mappability mask for the P(s) areas (default=100)")
     parser.add_argument("--min_mappability", type=float, default=1.0,
                         help="Min GenMap score of a mappable position (default=1.0 = unique k-mer)")
-    parser.add_argument("--coverage_min_fraction", type=float, default=0.8,
+    parser.add_argument("--coverage_min_fraction", type=float, default=0.3,
                         help="Coverage bins kept if their mappable fraction (of their own width) "
-                             "is >= this value, else interpolated (default=0.8)")
+                             "is >= this value, else interpolated (default=0.3; 0.8 excluded 80 %% "
+                             "of the mosquito bins)")
     parser.add_argument("--coverage_min_bp", type=int, default=100,
                         help="... and if they contain >= this number of mappable bp (default=100)")
     parser.add_argument("--coverage_min_ratio", type=float, default=0.0,
@@ -820,6 +856,9 @@ def main():
     parser.add_argument("--density_reproducibility", type=float, default=0.8,
                         help="--density_n_min auto: target reproducible part of the fine "
                              "fluctuations of the density (default=0.8)")
+    parser.add_argument("--density_bin_size", default=None,
+                        help="Bin size of the 2D density (default = --bin_size; 'auto' = from "
+                             "the available memory, for large genomes)")
     parser.add_argument("--density_n_min_trans", type=int, default=200,
                         help="Density: min contacts per adaptive window in trans (default=200)")
     parser.add_argument("--coverage_all_reads", default=None,
@@ -853,6 +892,8 @@ def main():
         density_n_min    = args.density_n_min if args.density_n_min == "auto" else int(args.density_n_min),
         density_n_min_trans = args.density_n_min_trans,
         density_reproducibility = args.density_reproducibility,
+        density_bin_size = (args.density_bin_size if args.density_bin_size in (None, "auto")
+                            else int(args.density_bin_size)),
     )
 
 

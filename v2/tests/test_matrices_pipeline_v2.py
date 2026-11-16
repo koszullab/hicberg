@@ -108,3 +108,16 @@ def test_run_stage():
         start_stage, exit_stage = "classify", "stats"
     assert hb.run_stage("classify", A) and hb.run_stage("stats", A)
     assert not hb.run_stage("align", A) and not hb.run_stage("rescue", A)
+
+
+def test_auto_plot_and_density_bin_sizes():
+    import density_v2 as dn
+    yeast = {"chrIV": 1_531_933, "chrXII": 1_078_177}
+    assert mx.auto_plot_bin_size(yeast, list(yeast), 2000) == 2000
+    assert dn.auto_density_bin_size(yeast, 2000, memory=8 * 1024 ** 3) == 2000
+    mosq = {"c1": 132_876_167, "c2": 225_161_840, "w": 1_369_678}
+    assert mx.auto_plot_bin_size(mosq, ["c1", "c2"], 2000) == 100_000
+    assert dn.auto_density_bin_size(mosq, 2000, memory=20 * 1024 ** 3) == 25_000
+    many = {f"s{k}": 10_000 for k in range(40)} | mosq
+    assert mx.auto_plot_chroms(many) == ["c1", "c2", "w"]
+    np.testing.assert_allclose(mx.rebin_mean([1, 3, 5, np.nan, 7], 2), [2, 5, 7])

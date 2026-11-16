@@ -48,6 +48,79 @@ def genome_bins(chrom_sizes, bin_size):
     return n_bins, offsets
 
 
+def available_memory():
+    """Available RAM in bytes (Linux /proc/meminfo MemAvailable; None elsewhere)."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+# Peak memory of block_density (unbiased + adaptive window) per cell of the
+# largest block: measured ~52 bytes (n = 4000: +0.84 GB over the input); x2 for
+# the split halves of --density_n_min auto.
+DENSITY_BYTES_PER_CELL = 100
+NICE_BIN_SIZES = (2_000, 5_000, 10_000, 20_000, 25_000, 50_000, 100_000, 200_000, 250_000,
+                  500_000, 1_000_000)
+
+
+def auto_density_bin_size(chrom_sizes, bin_size, memory=None, fraction=0.5):
+    """
+    Smallest "nice" bin size (>= bin_size) such that the density of the
+    largest chromosome fits in `fraction` of the available memory:
+    DENSITY_BYTES_PER_CELL × (L_max / b)^2 <= fraction × memory.
+    Yeast (L_max 1.5 Mb): 2 kb; mosquito (225 Mb, 16 GB free): 25 kb.
+    """
+    memory = memory or available_memory() or 8 * 1024 ** 3
+    l_max = max(chrom_sizes.values())
+    b_min = l_max * np.sqrt(DENSITY_BYTES_PER_CELL / (fraction * memory))
+    for b in NICE_BIN_SIZES:
+        if b >= max(b_min, bin_size):
+            return int(b)
+    return int(max(b_min, bin_size))
+
+
+def data_density_bin_size(ps_counts, xs, chrom_sizes, bin_size, n_min=200, window=45,
+                           max_fallback=0.05, candidates=NICE_BIN_SIZES):
+    """
+    Smallest bin size (>= bin_size, in `candidates`) at which the adaptive
+    window can reach n_min contacts for most contacts: at distance d the
+    contact density per position pair is rho(d) = N(d) / ((L - d) Δd) (from
+    the intra P(s) counts), a window of `window` × `window` bins of size b
+    holds ~ window² rho(d) b² contacts; the fraction of the intra contacts
+    whose window holds < n_min ("fallback") must be <= max_fallback.
+    Yeast AC1 (36 M pairs, 12 Mb): 0 at 2 kb → 2 kb. Mosquito (3.3 M unique
+    pairs, 575 Mb): 21 % at 2 kb, 7 % at 25 kb, 4.8 % at 50 kb → 50 kb.
+    ps_counts: {chrom: (orientations, n_xs)} raw counts; xs: {chrom: left
+    edges of the log distance bins}.
+    """
+    def fallback(b):
+        num = den = 0.0
+        for c, L in chrom_sizes.items():
+            if c not in ps_counts:
+                continue
+            n = np.asarray(ps_counts[c], dtype=np.float64).sum(axis=0)
+            x = np.asarray(xs[c], dtype=np.float64)[:len(n)]
+            edges = np.append(x, max(L, x[-1] + 1))
+            area = np.clip(L - (edges[:-1] + edges[1:]) / 2, 0, None) * np.diff(edges)
+            ok = area > 0
+            rho = np.zeros_like(area)
+            rho[ok] = n[ok] / area[ok]
+            fb = ok & (window * window * rho * b * b < n_min)
+            num += n[fb].sum()
+            den += n[ok].sum()
+        return num / den if den else 0.0
+
+    for b in candidates:
+        if b >= bin_size and fallback(b) <= max_fallback:
+            return int(b), fallback(b)
+    return int(candidates[-1]), fallback(candidates[-1])
+
+
 def contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize=5_000_000,
                    split_halves=False, seed=0):
     """
@@ -198,21 +271,42 @@ def obs_exp_binned(mat, intra, w_row=None, w_col=None, k=1):
         return np.where(exp > 0, obs / exp, np.nan)
 
 
-def adaptive_filter(z, counts, windows=(1, 3, 5, 11, 21, 31, 45), n_min=200):
+def adaptive_filter(z, counts, windows=(1, 3, 5, 11, 21, 31, 45), n_min=200, expected=None):
     """
     For each pixel, nan-mean of z over the smallest window (in `windows`) that
-    holds >= n_min raw contacts (Poisson error <= 1/sqrt(n_min)); the largest
-    window where none does. Sharp where contacts are dense (centromeres,
-    near the diagonal), wide on sparse regions (arms in trans).
-    Returns (smoothed, chosen window size per pixel).
+    holds >= n_min raw contacts (Poisson error <= 1/sqrt(n_min)). Sharp where
+    contacts are dense (centromeres, near the diagonal), wide on sparse
+    regions (arms in trans).
+    Where even the largest window holds fewer than n_min contacts:
+      expected None : nan-mean over the largest window (previous behaviour)
+      expected given: shrinkage towards 1 (no information beyond the P(s)),
+                      (O + δ) / (E + δ) with O, E the observed / expected
+                      contacts of the largest window and δ = n_min - O: the
+                      missing contacts are taken at density 1. Continuous at
+                      O = n_min; avoids the 0 / huge values of sparse data
+                      (mosquito 25 kb: 0.006 contact per far-field pixel,
+                      densities up to 230 before).
+    Returns (smoothed, chosen window size per pixel; 0 = shrunk fallback).
     """
     c = np.where(np.isfinite(counts), counts, 0.0)
     out = np.full(z.shape, np.nan)
     chosen = np.zeros(z.shape, dtype=np.int32)
     todo = np.ones(z.shape, dtype=bool)
+    last = len(windows) - 1
     for k, w in enumerate(windows):
-        enough = uniform_filter(c, size=w, mode="mirror") * w * w >= n_min
-        sel = todo & (enough | (k == len(windows) - 1))
+        o_w = uniform_filter(c, size=w, mode="mirror") * w * w
+        enough = o_w >= n_min
+        if k == last and expected is not None:
+            sel = todo & enough
+            fb = todo & ~enough
+            if fb.any():
+                e = np.where(np.isfinite(expected), expected, 0.0)
+                e_w = uniform_filter(e, size=w, mode="mirror") * w * w
+                delta = np.clip(n_min - o_w, 0, None)
+                out[fb] = ((o_w + delta) / (e_w + delta))[fb]
+                todo &= ~fb
+        else:
+            sel = todo & (enough | (k == last))
         if sel.any():
             out[sel] = nanmean_filter(z, w)[sel]
             chosen[sel] = w
@@ -233,7 +327,10 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     """
     mat = mat.astype(np.float64)
     counts = mat.copy()
+    expected = None
     if method == "unbiased":
+        expected, defined = expected_unbiased(mat, intra, w_row, w_col)
+        expected = np.where(defined, expected, 0.0)
         mat = obs_exp_unbiased(mat, intra, w_row, w_col)
     elif method == "v1":
         if intra:
@@ -249,7 +346,8 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     if smoothing == "fixed":
         smooth = nanmean_filter(filled, patch_large)
     elif smoothing == "adaptive":
-        smooth, _ = adaptive_filter(filled, counts, windows, n_min)
+        smooth, _ = adaptive_filter(filled, counts, windows, n_min, expected)
+        smooth = np.clip(smooth, 0, None)
     else:
         raise ValueError(f"Unknown density smoothing: {smoothing}")
 

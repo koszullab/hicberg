@@ -178,6 +178,61 @@ def _bin_sum(mask, bin_size):
     return np.pad(mask, (0, n * bin_size - len(mask))).reshape(n, bin_size).sum(axis=1)
 
 
+NICE_FACTORS = (1, 2, 5, 10, 25, 50, 100, 250, 500, 1000)
+
+
+def auto_plot_bin_size(chrom_sizes, chroms, bin_size, max_bins=3000):
+    """
+    Bin size of the before / after plots: bin_size × the smallest nice factor
+    such that the largest plotted chromosome has <= max_bins bins (a dense
+    map of a 225 Mb chromosome at 2 kb cannot be drawn). Yeast: 2 kb;
+    mosquito (225 Mb): 100 kb.
+    """
+    l_max = max(chrom_sizes[c] for c in chroms)
+    for f in NICE_FACTORS:
+        if l_max / (bin_size * f) <= max_bins:
+            return bin_size * f
+    return bin_size * NICE_FACTORS[-1]
+
+
+def auto_plot_chroms(chrom_sizes, max_all=30, min_size=1_000_000, max_chroms=20):
+    """
+    Sequences shown in the before / after plots: all of them if <= max_all,
+    else those >= min_size (at most max_chroms, the largest), e.g. the
+    chromosomes and large scaffolds / symbionts of a draft assembly.
+    """
+    if len(chrom_sizes) <= max_all:
+        return list(chrom_sizes)
+    big = [c for c, L in sorted(chrom_sizes.items(), key=lambda x: -x[1]) if L >= min_size]
+    keep = set(big[:max_chroms]) or {max(chrom_sizes, key=chrom_sizes.get)}
+    return [c for c in chrom_sizes if c in keep]
+
+
+def coarsen_cool(cool, factor, out_cool, mad_max=5, nproc=4, balance=True):
+    """cooler coarsen (factor × the bin size) + ICE balancing."""
+    out_cool = Path(out_cool)
+    subprocess.run(["cooler", "coarsen", "-k", str(factor), "-p", str(nproc), "-o", str(out_cool),
+                    str(cool)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if balance:
+        subprocess.run(["cooler", "balance", "--force", "--nproc", str(nproc),
+                        "--mad-max", str(mad_max), str(out_cool)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out_cool
+
+
+def rebin_mean(values, factor):
+    """Mean over groups of `factor` consecutive bins (last group may be shorter)."""
+    v = np.asarray(values, dtype=np.float64)
+    if factor <= 1:
+        return v
+    n = -(-len(v) // factor)
+    p = np.full(n * factor, np.nan)
+    p[:len(v)] = v
+    with np.errstate(invalid="ignore"), np.testing.suppress_warnings() as sup:
+        sup.filter(RuntimeWarning)
+        return np.nanmean(p.reshape(n, factor), axis=1)
+
+
 def gc_content(genome, chrom_sizes, bin_size):
     """{chrom: GC fraction per bin} from a FASTA (N not counted)."""
     out = {}

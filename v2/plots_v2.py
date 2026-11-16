@@ -32,6 +32,7 @@ import numpy as np                                    # noqa: E402
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
 DENSITY, CONTACTS, CHROM_SIZES = "density_map.npy", "contacts.npz", "chromosome_sizes.npy"
+DENSITY_BIN, DENSITY_MASK = "density_bin_size.npy", "density_mask.npy"
 PS_COUNTS, MAPPABILITY, COVERAGE_KEPT = "ps_counts.npz", "mappability.npy", "coverage_kept.npy"
 
 # Same colours as hicberg/plot.py
@@ -100,6 +101,10 @@ def plot_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "reference"))
 
             missing = [lab for lab, d in zip(labels, (xs, xs_ref)) if d is not None and chrom not in d]
             title = f"P(s) — {chrom}" + (f"  (absent in {', '.join(missing)})" if missing else "")
+            if not any(len(l.get_xdata()) for l in ax.get_lines()):
+                # no pair on this sequence (e.g. small unmappable scaffold): skip the page
+                plt.close(fig)
+                continue
             ax.set(xscale="log", yscale="log", title=title,
                    xlabel="Genomic distance (bp, log bins)",
                    ylabel="Number of events / number of position pairs")
@@ -329,17 +334,40 @@ def plot_trans_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "refere
 # Density maps
 # ---------------------------------------------------------------------------
 
-def _genome_density(density):
-    """Assemble the {(a, b): block} density map into one genome-wide matrix."""
+def _block_downsample(blk, factor):
+    """nan-mean over factor × factor cells of a (rectangular) block."""
+    if factor <= 1:
+        return np.asarray(blk, dtype=np.float64)
+    r, c = -(-blk.shape[0] // factor), -(-blk.shape[1] // factor)
+    p = np.full((r * factor, c * factor), np.nan)
+    p[:blk.shape[0], :blk.shape[1]] = blk
+    with np.errstate(invalid="ignore"), np.testing.suppress_warnings() as sup:
+        sup.filter(RuntimeWarning)
+        return np.nanmean(p.reshape(r, factor, c, factor), axis=(1, 3))
+
+
+def _genome_density(density, chroms=None, max_pixels=None):
+    """
+    Assemble the {(a, b): block} density map into one genome-wide matrix
+    (chromosomes `chroms`, default all), each block downsampled by the same
+    factor first (at most max_pixels rows): the full matrix of a large genome
+    does not fit in memory. Returns (matrix, names, offsets, factor).
+    """
     names = [a for a, b in density if a == b]
-    sizes = [density[(c, c)].shape[0] for c in names]
+    if chroms is not None:
+        names = [c for c in names if c in set(chroms)]
+    total = sum(density[(c, c)].shape[0] for c in names)
+    factor = max(1, -(-total // max_pixels)) if max_pixels else 1
+    sizes = [-(-density[(c, c)].shape[0] // factor) for c in names]
     offsets = np.concatenate([[0], np.cumsum(sizes)])
     g = np.full((offsets[-1], offsets[-1]), np.nan)
-    for (a, b), blk in density.items():
-        i, j = names.index(a), names.index(b)
-        g[offsets[i]:offsets[i + 1], offsets[j]:offsets[j + 1]] = blk
-        g[offsets[j]:offsets[j + 1], offsets[i]:offsets[i + 1]] = blk.T
-    return g, names, offsets
+    for i, a in enumerate(names):
+        for j, b in enumerate(names):
+            if (a, b) in density:
+                blk = _block_downsample(density[(a, b)], factor)
+                g[offsets[i]:offsets[i + 1], offsets[j]:offsets[j + 1]] = blk
+                g[offsets[j]:offsets[j + 1], offsets[i]:offsets[i + 1]] = blk.T
+    return g, names, offsets, factor
 
 
 def _downsample(g, factor):
@@ -354,7 +382,7 @@ def _downsample(g, factor):
         return np.nanmean(p.reshape(n // factor, factor, n // factor, factor), axis=(1, 3))
 
 
-def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
+def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0, chroms=None):
     """
     maps: [(label, density_map.npy path), ...] shown side by side.
     Page 1: genome-wide log2(density) (red = more contacts than expected);
@@ -377,11 +405,10 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
     with PdfPages(output_pdf) as pdf:
         fig, axes = plt.subplots(1, len(loaded), figsize=(7 * len(loaded), 7), squeeze=False)
         for ax, (lab, d) in zip(axes[0], loaded):
-            g, names, offsets = _genome_density(d)
-            factor = -(-g.shape[0] // max_pixels)
-            im = show(ax, _downsample(g, factor), f"{lab} — log2 density (genome)",
-                      ((offsets[:-1] + offsets[1:]) / 2 / factor, names))
-            for o in offsets[1:-1] / factor:
+            g, names, offsets, factor = _genome_density(d, chroms, max_pixels)
+            im = show(ax, g, f"{lab} — log2 density (genome)",
+                      ((offsets[:-1] + offsets[1:]) / 2, names))
+            for o in offsets[1:-1]:
                 ax.axhline(o - 0.5, color="black", lw=0.3)
                 ax.axvline(o - 0.5, color="black", lw=0.3)
         fig.colorbar(im, ax=axes[0].tolist(), fraction=0.02, label="log2 density")
@@ -390,7 +417,8 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
 
         first = loaded[0][1]
         if zoom_pairs is None:
-            zoom_pairs = [k for k in first if k[0] != k[1]][:3]
+            zoom_pairs = [k for k in first if k[0] != k[1]
+                          and (chroms is None or (k[0] in chroms and k[1] in chroms))][:3]
         for pair in zoom_pairs:
             fig, axes = plt.subplots(1, len(loaded), figsize=(6 * len(loaded), 5), squeeze=False)
             for ax, (lab, d) in zip(axes[0], loaded):
@@ -403,7 +431,8 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0):
 
 
 def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=200,
-                          vlim=1.5, vlim_raw=3.0, raw_bin_intra=1, raw_bin_trans=5):
+                          vlim=1.5, vlim_raw=3.0, raw_bin_intra=1, raw_bin_trans=5,
+                          chroms=None):
     """
     One page per chromosome (density_intra.pdf) and per pair of chromosomes
     (density_trans.pdf, at most max_trans_pairs), with 2 matrices side by side,
@@ -424,22 +453,31 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
     sizes = load_dict(stats_dir, CHROM_SIZES)
     upper = sparse.load_npz(stats_dir / CONTACTS)
     matrix = (upper + upper.T - sparse.diags(upper.diagonal())).tocsr()
-    names = [a for a, b in density if a == b]
-    n_bins = {c: density[(c, c)].shape[0] for c in names}
-    offsets = dict(zip(names, np.concatenate([[0], np.cumsum([n_bins[c] for c in names])[:-1]])))
+    all_names = [a for a, b in density if a == b]
+    n_bins = {c: density[(c, c)].shape[0] for c in all_names}
+    offsets = dict(zip(all_names,
+                       np.concatenate([[0], np.cumsum([n_bins[c] for c in all_names])[:-1]])))
+    names = [c for c in all_names if chroms is None or c in set(chroms)]
+    if (stats_dir / DENSITY_BIN).is_file():
+        bin_size = int(np.load(stats_dir / DENSITY_BIN))
 
-    kept, frac = load_dict(stats_dir, COVERAGE_KEPT), load_dict(stats_dir, MAPPABILITY)
-    bad = {c: (~kept[c][:n_bins[c]] if kept is not None and c in kept else np.zeros(n_bins[c], bool))
-           for c in names}
-    weights = {}
-    for c in names:
-        n = n_bins[c]
-        if frac is not None and c in frac:
-            f = np.zeros(n)
-            f[:min(n, len(frac[c]))] = frac[c][:n]
-            weights[c] = f * np.clip(sizes[c] - np.arange(n) * bin_size, 0, bin_size) / bin_size
-        else:
-            weights[c] = None
+    mask = load_dict(stats_dir, DENSITY_MASK)
+    if mask is not None:                        # bad bins and weights at the density bin
+        bad = {c: mask[c][0] for c in names}
+        weights = {c: mask[c][1] for c in names}
+    else:                                       # older runs: density at the coverage bin
+        kept, frac = load_dict(stats_dir, COVERAGE_KEPT), load_dict(stats_dir, MAPPABILITY)
+        bad = {c: (~kept[c][:n_bins[c]] if kept is not None and c in kept
+                   else np.zeros(n_bins[c], bool)) for c in names}
+        weights = {}
+        for c in names:
+            n = n_bins[c]
+            if frac is not None and c in frac:
+                f = np.zeros(n)
+                f[:min(n, len(frac[c]))] = frac[c][:n]
+                weights[c] = f * np.clip(sizes[c] - np.arange(n) * bin_size, 0, bin_size) / bin_size
+            else:
+                weights[c] = None
 
     def raw_obs_exp(a, b, k):
         blk = matrix[offsets[a]:offsets[a] + n_bins[a], offsets[b]:offsets[b] + n_bins[b]]
@@ -608,7 +646,7 @@ def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genom
 
 
 def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
-             labels=("v2", "reference")):
+             labels=("v2", "reference"), plot_chroms=None):
     output_dir = Path(output_dir or stats_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     done = []
@@ -628,10 +666,10 @@ def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
         maps = [(labels[0], Path(stats_dir) / DENSITY)]
         if compare_dir and (Path(compare_dir) / DENSITY).is_file():
             maps.append((labels[1], Path(compare_dir) / DENSITY))
-        plot_density(maps, output_dir / "density.pdf")
+        plot_density(maps, output_dir / "density.pdf", chroms=plot_chroms)
         done.append("density.pdf")
         if (Path(stats_dir) / CONTACTS).is_file():
-            plot_density_matrices(stats_dir, output_dir, bin_size)
+            plot_density_matrices(stats_dir, output_dir, bin_size, chroms=plot_chroms)
             done += ["density_intra.pdf", "density_trans.pdf"]
 
     print(f"Plots saved in {output_dir}: {', '.join(done)}")
