@@ -93,7 +93,7 @@ def main():
     p.add_argument("--hicstuff", action="store_true",
                    help="Filter non-informative events and PCR duplicates with hicstuff")
     p.add_argument("--enzyme", default=None, help="Restriction enzyme(s) of the Hi-C, e.g. DpnII,HinfI "
-                                                  "(a number or 'mnase' for Micro-C); used by hicstuff "
+                                                  "(Micro-C: 'mnase' = virtual 100 bp fragments, or a size in bp); used by hicstuff "
                                                   "and for the sites-per-bin track of the plots")
     p.add_argument("--intra_only", action="store_true",
                    help="Before / after plots for intra-chromosomal maps only (default if > 30 chromosomes)")

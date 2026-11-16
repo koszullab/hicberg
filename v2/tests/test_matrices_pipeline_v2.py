@@ -27,6 +27,40 @@ def test_gc_content(tmp_path):
     np.testing.assert_allclose(gc["chrB"], [0.0])
 
 
+def _hicstuff_ok():
+    try:
+        import hicstuff.pipeline  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _hicstuff_ok(), reason="hicstuff not installed")
+def test_hicstuff_filter_given_thresholds_and_microc(tmp_path):
+    rng = np.random.default_rng(0)
+    seq = "".join(rng.choice(list("ACGT"), 20000))
+    fa = tmp_path / "g.fa"
+    fa.write_text(">chrA\n" + seq + "\n")
+    rows = [("chrA", 1000, "chrA", 15000, "+", "-"),      # far apart: kept
+            ("chrA", 1000, "chrA", 15000, "+", "-"),      # PCR duplicate
+            ("chrA", 2000, "chrA", 2050, "+", "-"),       # uncut (same fragment, +-)
+            ("chrA", 5000, "chrA", 12000, "-", "+")]      # far: kept
+    pairs = tmp_path / "x.pairs"
+    pairs.write_text("## pairs format v1.0\n#chromsize: chrA 20000\n"
+                     "#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n" +
+                     "".join(f"r{k}\t{a}\t{p}\t{b}\t{q}\t{s1}\t{s2}\n"
+                             for k, (a, p, b, q, s1, s2) in enumerate(rows)))
+    out, thr = mx.hicstuff_filter(pairs, fa, "DpnII", tmp_path / "o", 1, "x", thresholds=(3, 3))
+    kept = [l.split("\t")[2] for l in out.read_text().splitlines() if not l.startswith("#")]
+    assert thr == (3, 3) and sorted(kept) == ["1000", "5000"]
+    # Micro-C: virtual 100 bp fragments; the 50 bp +- pair is an uncut there too
+    out, thr = mx.hicstuff_filter(pairs, fa, "mnase", tmp_path / "m", 1, "x", thresholds=(3, 3))
+    kept = [l.split("\t")[2] for l in out.read_text().splitlines() if not l.startswith("#")]
+    assert sorted(kept) == ["1000", "5000"]
+    frags = {int(l.split("\t")[7]) for l in out.read_text().splitlines() if not l.startswith("#")}
+    assert frags == {9, 49}           # 1-based pos 1000 = last base of the 10th 100 bp segment
+
+
 def test_restriction_sites(tmp_path):
     fa = tmp_path / "g.fa"
     # DpnII GATC (palindromic) and HinfI GANTC; bins of 10 bp

@@ -621,8 +621,8 @@ k = read length read from R1, `--no_mappability`) → `align` (bowtie2
 Group2 chunks = cpus / 4, re-aligned and re-attributed in parallel.
 
 **matrices_v2.py** (last stage):
-- `--hicstuff`: `hicstuff pipeline --start-stage=pairs --filter --duplicates`
-  on unrescued.pairs and rescued.pairs (non-informative events: uncuts,
+- `--hicstuff`: hicstuff filtering (as `hicstuff pipeline --start-stage=pairs
+  --filter --duplicates`) on unrescued.pairs and rescued.pairs (non-informative events: uncuts,
   loops, weirds; PCR duplicates), in `matrices/hicstuff_<prefix>/`.
   Needs the 4DN pairs header: columns **chr1 / chr2** (our first files used
   chrom1 / chrom2: pairtools sort failed and the PCR-free file was empty) and
@@ -633,8 +633,19 @@ Group2 chunks = cpus / 4, re-aligned and re-attributed in parallel.
   thresholds per library; on yeast it chose 19 / 25 fragments on unrescued
   but 8 / 10 on rescued, so the rescued pairs were less filtered (1.23M uncuts
   removed vs 1.39M from a file they contain) and before / after was biased.
-  Now the thresholds estimated on unrescued are applied to rescued
-  (`hicstuff pipeline --duplicates`, then `hicstuff filter --thresholds u-l`).
+  Now the thresholds estimated on unrescued are applied to rescued.
+  **hicstuff library calls instead of `hicstuff pipeline`** (2026-11-16): the
+  pipeline always built its own cooler matrix, unused here (~15 min per file
+  on the 47 M pairs of full AC1). `hicstuff_filter` now calls the same steps
+  one by one: `digest.attribute_fragments`, `io.sort_pairs`,
+  `filter.get_thresholds` (unrescued) / given thresholds (rescued),
+  `filter.filter_events`, `pipeline.filter_pcr_dup` (events filtered before
+  duplicates, as hicstuff). Checked on 1.5 M yeast pairs: same thresholds
+  (19 / 22) and identical 1,130,918 output pairs, 45 s vs 82 s. Micro-C
+  (`--enzyme mnase`, or a number): hicstuff fixed-size digestion into virtual
+  fragments (100 bp by default), so that uncuts / loops / weirds between
+  neighbouring segments are filtered as with a frequent cutter, then PCR
+  duplicates.
 - cooler matrices at bin_size (`cooler cload pairs`) + ICE (`cooler balance`),
   mad-max 5 for unrescued, 1000 for rescued (as v1: the reconstructed repeats
   must not be filtered out again).

@@ -34,54 +34,85 @@ from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 # hicstuff filtering
 # ---------------------------------------------------------------------------
 
+MNASE_FRAGMENT = 100     # Micro-C: virtual fragment size (bp) for hicstuff event filtering
+
+
 def hicstuff_filter(pairs, genome, enzyme, out_dir, threads=4, prefix=None, thresholds=None):
     """
     hicstuff processing of a pairs file (4DN header with chr1 / chr2 and
-    #chromsize lines): removal of non-informative events (uncuts, loops,
-    weirds) and PCR duplicates. enzyme: e.g. "DpnII,HinfI", or a number /
-    "mnase" for MNase (Micro-C).
-      thresholds None : hicstuff pipeline --filter --duplicates, thresholds
-                        estimated from the library
+    #chromsize lines), with the hicstuff library functions called one by one
+    (as in hicstuff pipeline --start-stage=pairs --filter --duplicates, but
+    without the hicstuff matrix, which is not used and took ~15 min on 47 M
+    pairs):
+      1. restriction fragment of each read (hicstuff.digest.attribute_fragments)
+      2. sort by coordinates (hicstuff.io.sort_pairs)
+      3. removal of non-informative events: uncuts, loops, weirds
+         (hicstuff.filter.filter_events)
+      4. removal of PCR duplicates (hicstuff.pipeline.filter_pcr_dup)
+    enzyme: e.g. "DpnII,HinfI"; for Micro-C (MNase, no restriction site) a
+    number = virtual fragments of that size (hicstuff fixed-size digestion),
+    "mnase" = 100 bp fragments: uncuts, loops and weirds are then detected
+    between neighbouring 100 bp segments, as for a frequent cutter.
+      thresholds None : uncut / loop thresholds estimated from the library
+                        (hicstuff.filter.get_thresholds)
       thresholds (u, l): the same thresholds for another file (rescued pairs
                         must be filtered like the unrescued ones, else the
                         before / after comparison is biased: on yeast hicstuff
-                        estimated 19-25 on unrescued but 8-10 on rescued):
-                        pipeline --duplicates, then hicstuff filter --thresholds u-l
+                        estimated 19-25 on unrescued but 8-10 on rescued)
     Returns (filtered PCR-free pairs path, (uncut, loop) thresholds used).
+    The hicstuff log goes to out_dir/hicstuff_<prefix>/hicstuff.log.
     """
-    if shutil.which("hicstuff") is None:
-        raise RuntimeError("hicstuff not found in PATH")
+    import logging
     pairs, out_dir = Path(pairs), Path(out_dir)
     prefix = prefix or pairs.name.split(".")[0]
     work = out_dir / f"hicstuff_{prefix}"
-    work.mkdir(parents=True, exist_ok=True)
-    if str(enzyme).isdigit():
-        enzyme = "mnase"
-    cmd = ["hicstuff", "pipeline", "--start-stage=pairs", f"--enzyme={enzyme}",
-           f"--threads={threads}", "--duplicates", "--force",
-           f"--genome={genome}", f"--outdir={work}", f"--prefix={prefix}", str(pairs)]
-    if thresholds is None:
-        cmd.insert(4, "--filter")
+    tmp = work / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
     log_path = work / "hicstuff.log"
-    with open(log_path, "w") as log:
-        subprocess.run(cmd, check=True, stdout=log, stderr=subprocess.STDOUT)
-    pcrfree = work / f"{prefix}.valid_idx_pcrfree.pairs.gz"
-    if not pcrfree.is_file() or pcrfree.stat().st_size < 1000:
-        raise RuntimeError(f"hicstuff produced no pairs, see {log_path}")
-    if thresholds is None:
-        m = re.search(r"thresholds: uncuts=(\d+) loops=(\d+)", log_path.read_text())
-        if m is None:
-            raise RuntimeError(f"hicstuff filtering thresholds not found in {log_path}")
-        return pcrfree, (int(m.group(1)), int(m.group(2)))
-    plain = work / f"{prefix}.valid_idx_pcrfree.pairs"
-    with gzip.open(pcrfree, "rt") as src, open(plain, "w") as dst:
-        shutil.copyfileobj(src, dst)
-    out = work / f"{prefix}.valid_idx_pcrfree_filtered.pairs"
-    with open(log_path, "a") as log:
-        subprocess.run(["hicstuff", "filter", f"--thresholds={thresholds[0]}-{thresholds[1]}",
-                        str(plain), str(out)], check=True, stdout=log, stderr=subprocess.STDOUT)
-    plain.unlink()
-    return out, tuple(thresholds)
+    handler = logging.FileHandler(log_path, mode="w")
+    handler.setFormatter(logging.Formatter("%(levelname)s :: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        import hicstuff.digest as hcd
+        import hicstuff.filter as hcf
+        import hicstuff.io as hio
+        from hicstuff.pipeline import filter_pcr_dup
+        idx = work / f"{prefix}.valid_idx.pairs"
+        enz = str(enzyme).strip()
+        if enz.lower() == "mnase":
+            enz = MNASE_FRAGMENT
+        elif enz.isdigit():
+            enz = int(enz)
+        else:
+            enz = enz.split(",") if "," in enz else enz
+        logging.info("digestion: %s", f"virtual {enz} bp fragments" if isinstance(enz, int) else enz)
+        from Bio import SeqIO
+        table = {rec.id: hcd.get_restriction_table(rec.seq, enz)
+                 for rec in SeqIO.parse(hio.read_compressed(str(genome)), "fasta")}
+        hcd.attribute_fragments(str(pairs), str(idx), table)
+        hio.sort_pairs(str(idx), str(idx) + ".sorted", keys=["chr1", "pos1", "chr2", "pos2"],
+                       threads=threads, tmp_dir=str(tmp))
+        Path(str(idx) + ".sorted").replace(idx)
+        if thresholds is None:
+            thresholds = hcf.get_thresholds(str(idx))
+            logging.info("thresholds: uncuts=%d loops=%d", *thresholds)
+        else:
+            logging.info("thresholds given: uncuts=%d loops=%d", *thresholds)
+        use = work / f"{prefix}.valid_idx_filtered.pairs"
+        hcf.filter_events(str(idx), str(use), int(thresholds[0]), int(thresholds[1]))
+        idx.unlink()
+        out = work / f"{prefix}.valid_idx_filtered_pcrfree.pairs"
+        filter_pcr_dup(str(use), str(out))
+        use.unlink()
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+    with open(out) as fh:
+        if not any(not line.startswith("#") for line in fh):
+            raise RuntimeError(f"hicstuff produced no pairs, see {log_path}")
+    return out, tuple(int(t) for t in thresholds)
 
 
 # ---------------------------------------------------------------------------
