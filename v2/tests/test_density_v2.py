@@ -251,3 +251,20 @@ def test_data_density_bin_size():
     assert b == 2000 and fb == 0
     b2, fb2 = dn.data_density_bin_size(sparse_, xs, {"c": L}, 2000)
     assert b2 > 2000 and fb2 <= 0.05
+
+
+def test_adaptive_gaussian_recovers_enrichment_without_blocks():
+    rng = np.random.default_rng(2)
+    n = 120
+    expected = np.full((n, n), 0.5)
+    truth = np.ones((n, n))
+    truth[30:60, 70:100] = 2.0                               # a 2x enriched domain
+    counts = rng.poisson(expected * truth).astype(float)
+    d, sig = dn.adaptive_gaussian(counts, expected, n_min=200)
+    assert d[40:50, 80:90].mean() == pytest.approx(2.0, rel=0.2)
+    assert d[90:110, 5:25].mean() == pytest.approx(1.0, rel=0.15)
+    # continuous: no jump larger than the noise between neighbouring pixels
+    assert np.nanmax(np.abs(np.diff(np.log2(d[90:110, 5:25]), axis=1))) < 0.2
+    # shrinkage where no kernel reaches n_min (tiny block)
+    tiny, s2 = dn.adaptive_gaussian(np.zeros((4, 4)), np.full((4, 4), 0.01), n_min=200)
+    assert (s2 == 0).all() and ((tiny > 0.9) & (tiny <= 1.0)).all()   # no contact → ≈ 1

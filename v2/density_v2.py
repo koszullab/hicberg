@@ -332,6 +332,81 @@ def adaptive_filter(z, counts, windows=DENSITY_WINDOWS, n_min=200, expected=None
     return out, chosen
 
 
+GAUSSIAN_SIGMAS = tuple(float(x) for x in 0.5 * np.sqrt(2.0) ** np.arange(16))  # 0.5 … 90 bins
+
+
+def _box3(x, sigma):
+    """
+    Gaussian-like smoothing of standard deviation sigma (bins) by 3 passes of
+    a box filter (cost independent of sigma); zero padding outside the block.
+    Returns (smoothed, sum of the squared normalised 2D weights).
+    """
+    w = max(1, int(round(np.sqrt(4 * sigma * sigma + 1))))
+    if w % 2 == 0:
+        w += 1
+    y = x
+    for _ in range(3):
+        y = uniform_filter(y, size=w, mode="constant")
+    k1 = np.ones(w) / w
+    k = np.convolve(np.convolve(k1, k1), k1)
+    return y, float((k ** 2).sum()) ** 2
+
+
+def adaptive_gaussian(obs, expected, n_min=200, sigmas=GAUSSIAN_SIGMAS):
+    """
+    Density = smoothed observed / smoothed expected, with a Gaussian-like
+    kernel whose width adapts continuously to the local number of contacts.
+    For each sigma of the ladder: N_eff = smoothed counts / sum(w²) (equal to
+    the number of contacts for a box window, the Poisson effective sample
+    size of a weighted kernel), D_sigma = smooth(obs) / smooth(expected)
+    (ratio of sums: zeros and edges handled, no mean of noisy ratios). Each
+    pixel takes the smallest sigma with N_eff >= n_min, interpolated in log
+    N_eff with the previous sigma (geometric blend of the two densities): no
+    jump between window sizes, hence no square blocks. Where even the
+    largest sigma has N_eff < n_min: shrinkage towards 1, (O + δ) / (E + δ)
+    in contact units, δ = n_min - O (as adaptive_filter).
+    obs, expected: counts and expected counts (0 on excluded pixels).
+    Returns (density, sigma used per pixel; 0 = shrunk fallback).
+    """
+    obs = np.where(np.isfinite(obs), obs, 0.0)
+    expected = np.where(np.isfinite(expected), expected, 0.0)
+    out = np.full(obs.shape, np.nan)
+    used = np.zeros(obs.shape)
+    todo = np.ones(obs.shape, dtype=bool)
+    prev_d = prev_logn = None
+    for k, s in enumerate(sigmas):
+        so, sw2 = _box3(obs, s)
+        se, _ = _box3(expected, s)
+        n_eff = so / sw2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            d = np.where(se > 0, so / se, np.nan)
+        logn = np.log(np.maximum(n_eff, 1e-12))
+        reached = todo & (n_eff >= n_min)
+        if reached.any():
+            if prev_d is None:
+                out[reached] = d[reached]
+            else:
+                # blend with the previous sigma, in log N_eff
+                t = (np.log(n_min) - prev_logn) / np.maximum(logn - prev_logn, 1e-12)
+                t = np.clip(t, 0, 1)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    blend = np.exp((1 - t) * np.log(np.maximum(prev_d, 1e-12))
+                                   + t * np.log(np.maximum(d, 1e-12)))
+                ok_prev = np.isfinite(prev_d) & (prev_d > 0)
+                out[reached] = np.where(ok_prev, blend, d)[reached]
+            used[reached] = s
+            todo &= ~reached
+        if not todo.any():
+            break
+        prev_d, prev_logn = d, logn
+    if todo.any():                              # shrinkage at the largest sigma
+        o_cnt = so / sw2
+        e_cnt = se / sw2
+        delta = np.clip(n_min - o_cnt, 0, None)
+        out[todo] = ((o_cnt + delta) / (e_cnt + delta))[todo]
+    return out, used
+
+
 def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1",
                   smoothing="fixed", windows=DENSITY_WINDOWS, n_min=200,
                   w_row=None, w_col=None):
@@ -341,7 +416,10 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     values >= max_val → 1, zeros → 1: biased upwards on sparse blocks,
     trans median 1.84 on yeast). "unbiased": obs_exp_unbiased(), zeros kept.
     smoothing "fixed": nan-mean over patch_large × patch_large (v1);
-    "adaptive": adaptive_filter(windows, n_min).
+    "adaptive": adaptive_filter(windows, n_min) (box windows);
+    "gaussian": adaptive_gaussian(n_min) (default of the pipeline: continuous
+    kernel width, no square blocks; better held-out likelihood, see
+    DEVELOPMENT.md).
     """
     mat = mat.astype(np.float64)
     counts = mat.copy()
@@ -366,6 +444,11 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     elif smoothing == "adaptive":
         smooth, _ = adaptive_filter(filled, counts, windows, n_min, expected)
         smooth = np.clip(smooth, 0, None)
+    elif smoothing == "gaussian":
+        if expected is None:
+            raise ValueError("smoothing 'gaussian' needs method 'unbiased'")
+        smooth, _ = adaptive_gaussian(counts, expected, n_min)
+        smooth = np.clip(np.where(np.isfinite(smooth), smooth, 1.0), 0, None)
     else:
         raise ValueError(f"Unknown density smoothing: {smoothing}")
 
@@ -416,7 +499,7 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
 
 def reproducible_n_min(halves, chrom_sizes, bin_size, bad_bins=None, weights=None,
                        grid=(25, 50, 100, 150, 200, 300, 400), target=0.8, min_dist=3,
-                       windows=DENSITY_WINDOWS):
+                       windows=DENSITY_WINDOWS, smoothing="gaussian"):
     """
     Choose the adaptive-window threshold n_min, separately for intra and trans,
     as the smallest one whose fine fluctuations are reproducible: on each of
@@ -451,7 +534,7 @@ def reproducible_n_min(halves, chrom_sizes, bin_size, bad_bins=None, weights=Non
             smooth = block_density(x, intra, method="unbiased", smoothing="fixed",
                                    patch_large=windows[-1], w_row=wr, w_col=wc)
             for nm in grid:
-                d = block_density(x, intra, method="unbiased", smoothing="adaptive",
+                d = block_density(x, intra, method="unbiased", smoothing=smoothing,
                                   windows=windows, n_min=nm / 2, w_row=wr, w_col=wc)
                 with np.errstate(divide="ignore", invalid="ignore"):
                     f = np.log2(d) - np.log2(smooth)
@@ -512,9 +595,10 @@ def main():
     parser.add_argument("--method", choices=["unbiased", "v1"], default="unbiased",
                         help="unbiased: zeros kept, expected including zeros (default); "
                              "v1: previous version (zeros → 1, trans biased upwards)")
-    parser.add_argument("--smoothing", choices=["adaptive", "fixed"], default="adaptive",
-                        help="adaptive: smallest window with >= n_min contacts (default); "
-                             "fixed: patch_large × patch_large (v1)")
+    parser.add_argument("--smoothing", choices=["gaussian", "adaptive", "fixed"], default="gaussian",
+                        help="gaussian (default): adaptive Gaussian kernel with >= n_min "
+                             "effective contacts; adaptive: smallest box window with >= n_min "
+                             "contacts; fixed: patch_large × patch_large (v1)")
     parser.add_argument("--n_min", default="200",
                         help="adaptive: min contacts per window in intra, or 'auto': smallest "
                              "threshold (intra and trans) whose fine fluctuations are >= --reproducibility "

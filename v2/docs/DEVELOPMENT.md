@@ -1015,3 +1015,29 @@ maps unchanged (log2 r = 0.991 intra / 0.996 trans vs the validated maps,
 changes in sparse chrMT / 2µ blocks); yeast telomere corners now visible
 too (50 × 50 kb: chrXII 1.05 → 1.51, chrII 1.06 → 1.21, chrIV 1.02 →
 1.06), as expected from the Rabl clustering of the telomeres.
+
+**Adaptive Gaussian density (default).** The box windows gave square blocks
+(each pixel jumps from one window size to the next). `adaptive_gaussian`:
+Gaussian-like kernel (3 box passes: cost independent of the width), widths
+σ = 0.5 … 90 bins (factor √2); density = smoothed observed / smoothed
+expected (ratio of sums); effective contacts N_eff = smoothed counts /
+Σ w² (= the count for a box); each pixel blends the two widths around
+N_eff = n_min (geometric, in log N_eff): continuous, no blocks; shrinkage
+towards 1 where even σ = 90 is below n_min. Compared on split halves
+(n_min / 2 per half), held-out Poisson log-likelihood gain over P(s) only
+(density of one half predicting the counts of the other) and split-half
+correlation of the log2 densities:
+
+| | box (previous) | Gaussian |
+|---|---|---|
+| yeast intra 2 kb (9 chr) | +38.4 mnat, r 0.969 | **+51.5**, r 0.951 |
+| yeast trans | +209.2, r 0.983 | **+214.7**, r 0.978 |
+| mosquito intra 50 kb (3 chr) | +139.0, r 0.917 | **+225.8**, r 0.936 |
+| mosquito trans | +134.6, r 0.932 | **+199.5**, r 0.953 |
+
+The held-out likelihood (penalises both noise and over-smoothing) is better
+everywhere; the box is slightly more reproducible on yeast intra because it
+over-smooths near the diagonal. Visual: no square blocks, structures
+continuous, far field with large domains (less shrinkage to 1), telomere
+corners kept (`moustic/density_box_vs_gaussian.pdf`). Now the default of
+statistics_v2 and of the n_min calibration (`smoothing="gaussian"`).

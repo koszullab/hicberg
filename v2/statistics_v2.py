@@ -737,7 +737,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                       + "  ".join(f"{k}:{v:.0%}" for k, v in d.items()) + f" → n_min = {best[g]}")
             density_n_min, density_n_min_trans = best["intra"], best["trans"]
         maps = dn.density_maps(matrix, chrom_sizes, db, bad, method="unbiased",
-                               smoothing="adaptive", n_min=int(density_n_min),
+                               smoothing="gaussian", n_min=int(density_n_min),
                                n_min_trans=int(density_n_min_trans), weights=weights)
         maps = {k: v.astype(np.float32) for k, v in maps.items()}
         np.save(output_dir / DENSITY_MAP, maps)
@@ -781,7 +781,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     else:
         lines.append("mappability           : - (trapezoid areas)")
     lines.append("density               : " + (
-        f"{db / 1000:g} kb bins, unbiased, adaptive window (>= {density_n_min} contacts intra, "
+        f"{db / 1000:g} kb bins, unbiased, adaptive Gaussian (>= {density_n_min} contacts intra, "
         f">= {density_n_min_trans} trans{f', auto: >= {density_reproducibility:.0%} reproducible' if density_n_min_auto else ''})"
         + (", mappability mask and weights" if map_coarse is not None else "")
         if density else "-"))
