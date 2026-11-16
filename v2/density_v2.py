@@ -48,6 +48,11 @@ def genome_bins(chrom_sizes, bin_size):
     return n_bins, offsets
 
 
+# adaptive window sizes (bins). 61-181 added for sparse far fields (mosquito
+# 50 kb: ~200 contacts need ~3 × 3 Mb at the telomere-telomere corners)
+DENSITY_WINDOWS = (1, 3, 5, 11, 21, 31, 45, 61, 91, 121, 181)
+
+
 def available_memory():
     """Available RAM in bytes (Linux /proc/meminfo MemAvailable; None elsewhere)."""
     try:
@@ -204,11 +209,12 @@ def detrend_intra(mat, max_val=10):
     return out
 
 
-def expected_unbiased(mat, intra, w_row=None, w_col=None):
+def expected_unbiased(mat, intra, w_row=None, w_col=None, log_pool=1.1):
     """
     Expected contacts of each pixel, zeros included:
-      intra: expected(i, j) = E_d × w_i × w_j, E_d = sum of each diagonal /
-             sum of w_i w_j over its defined (non-NaN) pixels;
+      intra: expected(i, j) = E_d × w_i × w_j, E_d = sum of the diagonals /
+             sum of w_i w_j over their defined (non-NaN) pixels, the diagonals
+             pooled in log-distance groups (log_pool; None = per diagonal);
       trans: expected(i, j) = E × w_i × w_j, E = block sum / sum of w_i w_j.
     w = mappable length of each bin / bin_size (default 1).
     Returns (expected, defined); expected is 0 where nothing is expected.
@@ -226,7 +232,19 @@ def expected_unbiased(mat, intra, w_row=None, w_col=None):
     dist = np.abs(rows - cols)
     sums = np.bincount(dist[defined], weights=mat[defined], minlength=n)
     wsum = np.bincount(dist[defined], weights=W[defined], minlength=n)
-    e_d = np.divide(sums, wsum, out=np.zeros(n), where=wsum > 0)
+    if log_pool:
+        # diagonals pooled in log-distance groups (base log_pool, as the P(s)):
+        # the last diagonals hold a few pixels only, all near the corner, so a
+        # per-diagonal expected absorbs the telomere-telomere contacts
+        # (mosquito chr1 corner obs / exp 1.08 per diagonal, 2.10 pooled)
+        g = np.zeros(n, dtype=np.int64)
+        d = np.arange(1, n)
+        g[1:] = 1 + np.floor(np.log(d) / np.log(log_pool)).astype(np.int64)
+        _, g = np.unique(g, return_inverse=True)
+        gs, gw = np.bincount(g, weights=sums), np.bincount(g, weights=wsum)
+        e_d = np.divide(gs, gw, out=np.zeros(len(gs)), where=gw > 0)[g]
+    else:
+        e_d = np.divide(sums, wsum, out=np.zeros(n), where=wsum > 0)
     return np.where(defined, e_d[dist] * W, 0.0), defined
 
 
@@ -271,7 +289,7 @@ def obs_exp_binned(mat, intra, w_row=None, w_col=None, k=1):
         return np.where(exp > 0, obs / exp, np.nan)
 
 
-def adaptive_filter(z, counts, windows=(1, 3, 5, 11, 21, 31, 45), n_min=200, expected=None):
+def adaptive_filter(z, counts, windows=DENSITY_WINDOWS, n_min=200, expected=None):
     """
     For each pixel, nan-mean of z over the smallest window (in `windows`) that
     holds >= n_min raw contacts (Poisson error <= 1/sqrt(n_min)). Sharp where
@@ -315,7 +333,7 @@ def adaptive_filter(z, counts, windows=(1, 3, 5, 11, 21, 31, 45), n_min=200, exp
 
 
 def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1",
-                  smoothing="fixed", windows=(1, 3, 5, 11, 21, 31, 45), n_min=200,
+                  smoothing="fixed", windows=DENSITY_WINDOWS, n_min=200,
                   w_row=None, w_col=None):
     """
     Density map of one chromosome pair (mat: counts with NaN on bad bins).
@@ -365,7 +383,7 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
 
 def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
                  patch_small=15, patch_large=45, max_val=10, method="v1",
-                 smoothing="fixed", windows=(1, 3, 5, 11, 21, 31, 45), n_min=200, weights=None,
+                 smoothing="fixed", windows=DENSITY_WINDOWS, n_min=200, weights=None,
                  n_min_trans=None):
     """
     {(chrom_a, chrom_b): density} for every pair of chromosomes (a <= b in
@@ -398,7 +416,7 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
 
 def reproducible_n_min(halves, chrom_sizes, bin_size, bad_bins=None, weights=None,
                        grid=(25, 50, 100, 150, 200, 300, 400), target=0.8, min_dist=3,
-                       windows=(1, 3, 5, 11, 21, 31, 45)):
+                       windows=DENSITY_WINDOWS):
     """
     Choose the adaptive-window threshold n_min, separately for intra and trans,
     as the smallest one whose fine fluctuations are reproducible: on each of

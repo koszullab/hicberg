@@ -76,7 +76,9 @@ def test_unbiased_keeps_zeros_and_averages_one():
     rng = np.random.default_rng(0)
     mat = rng.poisson(0.15, (60, 60)).astype(float)       # sparse, ~86% zeros
     mat = np.triu(mat) + np.triu(mat, 1).T
-    oe = dn.obs_exp_unbiased(mat, intra=True)
+    exp_d, _ = dn.expected_unbiased(mat, True, log_pool=None)          # per diagonal
+    with np.errstate(divide="ignore", invalid="ignore"):
+        oe = np.where(exp_d > 0, mat / exp_d, np.nan)
     dist = np.abs(np.subtract.outer(np.arange(60), np.arange(60)))
     empty_diag = np.array([np.diagonal(mat, k).sum() == 0 for k in range(60)])[dist]
     assert np.all(oe[(mat == 0) & ~empty_diag] == 0)       # zeros stay zeros
@@ -85,6 +87,11 @@ def test_unbiased_keeps_zeros_and_averages_one():
         diag = np.diagonal(oe, k)
         if np.nansum(np.diagonal(mat, k)) > 0:
             assert np.nanmean(diag) == pytest.approx(1.0)
+    # default: diagonals pooled in log-distance groups → no NaN on an empty
+    # diagonal whose group has contacts, and the whole matrix averages 1
+    pooled = dn.obs_exp_unbiased(mat, intra=True)
+    assert np.isnan(pooled).sum() < np.isnan(oe).sum()
+    assert np.nanmean(pooled[np.triu_indices(60)]) == pytest.approx(1.0, abs=0.1)
 
 
 def test_sparse_trans_block_not_inflated():

@@ -997,3 +997,21 @@ bins differ by > 10 %, mostly around unmappable regions); density log2 r =
 0.991 (intra median) / 0.995 (trans median) vs the previous maps, the
 changes are in the small sparse blocks (2µ × 2µ 4 × 4 bins, chrMT trans:
 shrunk towards 1).
+
+**Telomere-telomere contacts (mosquito) — expected pooled in log distance,
+larger windows.** The mosquito unrescued map at 1 Mb shows enriched
+telomere-telomere contacts, absent from the density (corner ≈ 1.0). Two
+causes: (1) the per-diagonal expected — the last diagonals hold a few pixels,
+all near the corner, so the expected absorbs the telomere contacts (chr1
+corner 3 × 3 Mb obs / exp 1.08 per diagonal, 2.10 with diagonals pooled in
+log-distance groups, base 1.1 as the P(s); chr2 2.01, chr3 1.47); (2) the
+largest adaptive window (45 bins = 2.25 Mb at 50 kb) holds far fewer than
+n_min contacts there (the 3 × 3 Mb corners hold 146-385 contacts).
+`expected_unbiased(log_pool=1.1)` (default) and DENSITY_WINDOWS extended to
+61, 91, 121, 181 bins (uniform filters: cost ∝ number of windows, not their
+size). Mosquito density corners (60 × 60 bins): chr1 1.02 → 2.26, chr2 1.01
+→ 3.22, chr3 1.00 → 1.97; far-field median 0.98-0.99. Yeast: chromosome
+maps unchanged (log2 r = 0.991 intra / 0.996 trans vs the validated maps,
+changes in sparse chrMT / 2µ blocks); yeast telomere corners now visible
+too (50 × 50 kb: chrXII 1.05 → 1.51, chrII 1.06 → 1.21, chrIV 1.02 →
+1.06), as expected from the Rabl clustering of the telomeres.
