@@ -286,6 +286,23 @@ def encode_quals(qualities_str):
     return qualities_str
 
 
+_REVCOMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def original_orientation(sequence, qualities, is_reverse):
+    """
+    Read as sequenced. For a read aligned on the reverse strand, SAM SEQ / QUAL
+    are reverse-complemented / reversed: they must be put back before writing
+    the group2 FASTQ, else the re-alignment sees every read on the + strand
+    (strand lost, reverse reads moved to the wrong 5' end; on full AC1 this
+    turned the rescued +- / -+ pairs into ++: 5.3 M ++ vs 0.16 M --, and the
+    hicstuff "weirds" of rescued x7).
+    """
+    if not is_reverse:
+        return sequence, qualities
+    return sequence.translate(_REVCOMP)[::-1], qualities[::-1]
+
+
 def write_fastq_record(fh, query_name, sequence, qualities):
     fh.write(f"@{query_name}\n{sequence}\n+\n{qualities}\n")
 
@@ -439,7 +456,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                 if chim2:
                     stats['chimeric_r2'] += 1
 
-            # Write to group2 FASTQ chunks
+            # Write to group2 FASTQ chunks, reads in their sequenced orientation
+            seq1, qual1 = original_orientation(seq1, qual1, r1['is_reverse'])
+            seq2, qual2 = original_orientation(seq2, qual2, r2['is_reverse'])
             write_fastq_record(g2_r1_files[chunk_idx], r1['query_name'], seq1, qual1)
             write_fastq_record(g2_r2_files[chunk_idx], r2['query_name'], seq2, qual2)
 

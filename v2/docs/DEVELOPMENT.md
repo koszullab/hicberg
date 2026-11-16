@@ -851,3 +851,43 @@ Commit convention:
 - [x] Replace `fitting_ps` (unstable outlier replacement) → `--ps_smoothing pool`
       (default), see "P(s) smoothing" in Module 2
 
+
+### Full AC1 run (47.3 M pairs) and the chrII right end (2026-11-16)
+
+Full AC1 (AC1.end1/2.fastq.gz, 47.3 M pairs, 16 CPUs): 89.9 min (old
+`hicstuff pipeline` call, ~27 min per file lost on the unused hicstuff
+matrix). group0 7.8 %, group1 77.0 %, group2 15.2 % (7.2 M pairs, all placed,
+70.8 % intra, 13.4 min). hicstuff thresholds 12 / 15; final matrices 23.7 M
+(unrescued) vs 29.7 M (rescued) contacts. Weirds 357 k in rescued vs 50 k in
+unrescued (same excess as on 10 M reads, still to explain).
+
+chrII right end under-covered after rescue: in the T2T BY4742 assembly the
+last ~25 kb (796.9-822.3 kb) are an inverted duplication of themselves (two
+~12.5 kb arms centred at ~808.9 kb; 200 bp probes at 800 / 805 / 812 / 818 kb
+have a perfect reverse copy at 817.9 / 812.9 / 805.9 / 799.9 kb). Mappability
+~0, so no unrescued reads; after rescue each arm gets 0.45-0.65× the genome
+median (unique flank 744-794 kb: ~1.0×), i.e. ~1× in total: AC1 most likely
+carries one copy only (this chrII is 822,297 bp vs 813,184 in S288C R64), and
+the rescue shares its reads between the two reference copies. Decision: no
+copy-number correction for now; the coverage track (before / after) is
+enough to warn the user that the assembly may have a different copy number
+than the sample (the opposite of the rDNA case).
+
+### Bug: group2 reads lost their strand (excess of weirds in rescued) — fixed
+
+The excess of hicstuff "weirds" in rescued (357 k vs 50 k on full AC1;
+83 k vs 10.5 k on 10 M) came from the classifier: for a read aligned on the
+reverse strand, SAM SEQ / QUAL are reverse-complemented / reversed, and the
+group2 FASTQ was written from them as is. At the re-alignment every read was
+back on the + strand: in predicted.pairs all the reads with a single
+candidate were "+", and the pairs were 5.34 M ++, 0.85 M +-, 0.85 M -+,
+0.16 M -- (short-range same-strand pairs ×4 more frequent than opposite,
+vs ×0.28 in unrescued; half of them in the rDNA). Reverse reads were also
+placed at their alignment start instead of their 5' end (shift ≤ read
+length, 35 bp: negligible at 2 kb, but the hicstuff event filtering of
+rescued was wrong). Fix: `original_orientation()` puts the read back as
+sequenced before writing the FASTQ. Checked on 50 k pairs of AC1: after
+re-alignment the 2,325 group2 R1 reads that were unique all come back on the
+same strand and position. The rescued results above (maps, fidelity,
+modes) used the wrong strands; at 2 kb they are barely affected, but the
+pipeline must be re-run from the alignment (SAMs not kept).

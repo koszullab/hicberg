@@ -76,3 +76,30 @@ def test_sam_chrom_sizes(tmp_path):
     sam.write_text("@HD\tVN:1.0\n@SQ\tSN:chrI\tLN:230490\n@SQ\tSN:chrII\tLN:822297\n"
                    + sam_line(0, 1, "150M", []))
     assert sc.sam_chrom_sizes(sam) == {"chrI": 230490, "chrII": 822297}
+
+
+def test_original_orientation():
+    assert sc.original_orientation("AACGT", "ABCDE", False) == ("AACGT", "ABCDE")
+    assert sc.original_orientation("AACGT", "ABCDE", True) == ("ACGTT", "EDCBA")
+
+
+def test_group2_fastq_keeps_the_sequenced_orientation(tmp_path):
+    # pair 1: R1 ambiguous on the reverse strand, R2 unique forward.
+    # SAM SEQ of a reverse read is the reverse complement of the sequenced read:
+    # the FASTQ must hold the read as sequenced, so that the re-alignment
+    # finds it on the reverse strand again.
+    sequenced = "ACGTTGCAAGGCTTACCGATAGCTAGGCTTAACGATCGATCGGATCCA"     # 48 bp
+    sam_seq = sequenced.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+    qual = "".join(chr(33 + 10 + k % 30) for k in range(48))
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n"
+    r1 = "\t".join(["p1", "16", "chr1", "500", "1", "48M", "*", "0", "0", sam_seq, qual[::-1],
+                    "AS:i:96", "XS:i:96"]) + "\n"
+    r2 = "\t".join(["p1", "0", "chr1", "9000", "42", "48M", "*", "0", "0", "A" * 48, "I" * 48,
+                    "AS:i:96"]) + "\n"
+    (tmp_path / "1.sam").write_text(head + r1)
+    (tmp_path / "2.sam").write_text(head + r2)
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
+    fq1 = (tmp_path / "out" / "group2_1_chunk0.fastq").read_text().splitlines()
+    fq2 = (tmp_path / "out" / "group2_2_chunk0.fastq").read_text().splitlines()
+    assert fq1[1] == sequenced and fq1[3] == qual
+    assert fq2[1] == "A" * 48
