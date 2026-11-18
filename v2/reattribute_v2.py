@@ -193,6 +193,37 @@ class Laws:
             out[sel] = blk[ba[sel], bb[sel]]
         return out
 
+    def coarse(self, near):
+        """
+        Chromosome × chromosome proposal law of the hierarchical draw (far combinations):
+        trans P(s) × mean trans density, intra: mean P(s) beyond `near` (pairs of positions
+        uniform on the chromosome, orientations averaged) × mean intra density. Only the
+        efficiency of the draw depends on it (the exact weights correct the proposal).
+        """
+        if getattr(self, "_coarse_near", None) == near:
+            return self._coarse
+        n = len(self.names)
+        g = np.ones((n, n)) if self.mode == "random" else self.trans.astype(np.float64).copy()
+        if self.mode != "random":
+            x = self.xs_glob.astype(np.float64)
+            width = np.diff(np.append(x, x[-1] * 1.1))
+            for c in range(n):
+                m = self.n_xs[c]
+                law = (self.law[c, 0, :m] + self.law[c, 1, :m] + 2 * self.law[c, 2, :m]) / 4
+                L = self.sizes[c] / (2 if self.circular[c] else 1)
+                w = width[:m] * np.clip(L - x[:m], 0, None) * (x[:m] >= near)
+                g[c, c] = (law * w).sum() / w.sum() if w.sum() > 0 else law[-1]
+        if self.mode == "full":
+            for a in range(n):
+                for b in range(a, n):
+                    blk = self.density[(self.names[a], self.names[b])]
+                    v = float(np.nanmean(blk)) if np.isfinite(blk).any() else 1.0
+                    g[a, b] *= v
+                    if a != b:
+                        g[b, a] *= v
+        self._coarse_near, self._coarse = near, np.where(np.isfinite(g) & (g > 0), g, 0.0)
+        return self._coarse
+
     def propensity(self, c1, p1, r1, c2, p2, r2):
         if self.mode == "random":
             return np.ones(len(c1))
@@ -255,21 +286,131 @@ def weighted_draw(weights, starts, sizes, rng):
 
 
 # ---------------------------------------------------------------------------
+# Hierarchical draw of the pairs with too many combinations
+# ---------------------------------------------------------------------------
+
+def near_combinations(laws, c1, p1, c2, p2, near):
+    """
+    Indices (i, j) of the R1 × R2 candidate combinations on the same chromosome at a
+    distance < near (circular distance on circular chromosomes), found by sorting the R2
+    positions per chromosome: cost ~ (n1 + n2) log n + number of near combinations.
+    """
+    out_i, out_j = [], []
+    for c in np.intersect1d(c1, c2):
+        i = np.flatnonzero(c1 == c)
+        j = np.flatnonzero(c2 == c)
+        if laws.circular[c]:                      # small molecules: all pairs, then filter
+            ii, jj = np.repeat(i, len(j)), np.tile(j, len(i))
+            d = st.cis_distance(p1[ii], p2[jj], laws.sizes[c], laws.circular[c])
+            keep = d < near
+            out_i.append(ii[keep]); out_j.append(jj[keep])
+            continue
+        order = j[np.argsort(p2[j], kind="stable")]
+        ps2 = p2[order]
+        lo = np.searchsorted(ps2, p1[i] - near, side="right")
+        hi = np.searchsorted(ps2, p1[i] + near, side="left")
+        cnt = hi - lo
+        if cnt.sum() == 0:
+            continue
+        ii = np.repeat(i, cnt)
+        offs = np.arange(cnt.sum()) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+        out_i.append(ii); out_j.append(order[np.repeat(lo, cnt) + offs])
+    if not out_i:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64)
+    return np.concatenate(out_i), np.concatenate(out_j)
+
+
+def hierarchical_draw(laws, cand1, cand2, rng, near=100_000, n_samples=256):
+    """
+    One combination of a pair with many candidates, without evaluating all n1 × n2
+    combinations (coarse-to-fine):
+      - near combinations (same chromosome, distance < near), where P(s) varies steeply:
+        all evaluated exactly (exact sum W_near);
+      - far combinations: n_samples drawn from a hierarchical proposal — chromosome pair
+        (A, B) ∝ coarse law(A, B) × Σ alignment weights of the R1 candidates on A × the same
+        for R2 on B, then one candidate on A and one on B ∝ their alignment weights — and
+        re-weighted by exact weight / proposal probability (importance sampling): the mean
+        ratio estimates W_far without bias, and resampling ∝ ratio gives the far draw;
+      - near vs far chosen ∝ W_near vs estimated W_far.
+    cand = (codes, positions, is_reverse, alignment weights). Returns (i, j, n evaluated).
+    """
+    c1, p1, r1, a1 = cand1
+    c2, p2, r2, a2 = cand2
+    ni, nj = near_combinations(laws, c1, p1, c2, p2, near)
+    w_near = laws.propensity(c1[ni], p1[ni], r1[ni], c2[nj], p2[nj], r2[nj]) * a1[ni] * a2[nj]
+    w_near = np.where(np.isfinite(w_near) & (w_near > 0), w_near, 0.0)
+    W_near = w_near.sum()
+
+    # proposal: chromosome pair, then candidates ∝ alignment weights
+    g = laws.coarse(near)
+    u1, inv1 = np.unique(c1, return_inverse=True)
+    u2, inv2 = np.unique(c2, return_inverse=True)
+    S1 = np.bincount(inv1, weights=a1)
+    S2 = np.bincount(inv2, weights=a2)
+    G = g[np.ix_(u1, u2)] * S1[:, None] * S2[None, :]
+    Z = G.sum()
+    W_far, si, sj, ratio = 0.0, None, None, None
+    if Z > 0:
+        k = rng.choice(G.size, size=n_samples, p=(G / Z).ravel())
+        A, B = k // len(u2), k % len(u2)
+
+        def pick(inv, a, groups, S):
+            order = np.argsort(inv, kind="stable")
+            cs = np.cumsum(a[order])
+            base = np.concatenate([[0.0], np.cumsum(S)])[groups]
+            idx = np.searchsorted(cs, base + rng.random(len(groups)) * S[groups], side="right")
+            return order[np.minimum(idx, len(order) - 1)]
+
+        si, sj = pick(inv1, a1, A, S1), pick(inv2, a2, B, S2)
+        q = g[c1[si], c2[sj]] * a1[si] * a2[sj] / Z
+        w = laws.propensity(c1[si], p1[si], r1[si], c2[sj], p2[sj], r2[sj]) * a1[si] * a2[sj]
+        same = c1[si] == c2[sj]
+        if same.any():                              # near combinations are counted above
+            d = st.cis_distance(p1[si][same], p2[sj][same], laws.sizes[c1[si][same]],
+                                laws.circular[c1[si][same]])
+            w[np.flatnonzero(same)[d < near]] = 0.0
+        ratio = np.where(np.isfinite(w) & (w > 0) & (q > 0), w / np.where(q > 0, q, 1), 0.0)
+        W_far = ratio.mean()
+    total = W_near + W_far
+    n_eval = len(ni) + (n_samples if Z > 0 else 0)
+    if total <= 0:                                  # nothing informative: uniform
+        return int(rng.integers(len(c1))), int(rng.integers(len(c2))), n_eval
+    if rng.random() * total < W_near:
+        t = np.searchsorted(np.cumsum(w_near), rng.random() * W_near, side="right")
+        t = min(t, len(w_near) - 1)
+        return int(ni[t]), int(nj[t]), n_eval
+    t = np.searchsorted(np.cumsum(ratio), rng.random() * ratio.sum(), side="right")
+    t = min(t, len(ratio) - 1)
+    return int(si[t]), int(sj[t]), n_eval
+
+
+# ---------------------------------------------------------------------------
 # One chunk
 # ---------------------------------------------------------------------------
 
 def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rate=0.01,
-                       batch_combinations=2_000_000):
+                       batch_combinations=2_000_000, max_combinations=0, near=100_000,
+                       n_samples=256):
     """
     Re-attribute the pairs of two SAM streams (R1, R2) and write the chosen
     combination of each pair to out_fh. Candidates: alignments within as_delta
     of the best score, each weighted by its likelihood (alignment_weights,
-    error_rate; 0 → best-score ties only). Returns counters.
+    error_rate; 0 → best-score ties only). Pairs with more than max_combinations
+    R1 × R2 combinations (> 0) are drawn by hierarchical_draw (near combinations
+    exact, far ones importance-sampled); 0 → all combinations always evaluated.
+    Returns counters.
     """
     lam = score_lambda(error_rate)
     if np.isinf(lam):
         as_delta = 0
-    stats = dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0)
+    stats = dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0,
+                 sampled=0, evaluated=0)
+
+    def as_arrays(c):
+        return (np.array([laws.code[a[0]] for a in c], dtype=np.int64),
+                np.array([a[1] for a in c], dtype=np.int64),
+                np.array([a[2] for a in c], dtype=bool),
+                alignment_weights([a[3] for a in c], lam))
     batch = []                     # (name, cands1, cands2)
     n_comb = 0
 
@@ -300,6 +441,7 @@ def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rat
         stats["placed"] += len(batch)
         stats["intra"] += int(np.sum(c1[s1] == c2[s2]))
         stats["combinations"] += int(k.sum())
+        stats["evaluated"] += int(k.sum())
         stats["cand1"] += int(n1.sum())
         stats["cand2"] += int(n2.sum())
         batch, n_comb = [], 0
@@ -313,6 +455,20 @@ def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rat
         c2 = [a for a in c2 if a[0] in laws.code]
         if not c1 or not c2:
             stats["unplaced"] += 1
+            continue
+        if max_combinations and len(c1) * len(c2) > max_combinations:
+            x1, x2 = as_arrays(c1), as_arrays(c2)
+            i, j, n_eval = hierarchical_draw(laws, x1, x2, rng, near, n_samples)
+            out_fh.write(f"{name1}\t{laws.names[x1[0][i]]}\t{x1[1][i]}\t{laws.names[x2[0][j]]}\t"
+                         f"{x2[1][j]}\t{'-' if x1[2][i] else '+'}\t{'-' if x2[2][j] else '+'}\t"
+                         f"{len(c1)}\t{len(c2)}\n")
+            stats["placed"] += 1
+            stats["sampled"] += 1
+            stats["intra"] += int(x1[0][i] == x2[0][j])
+            stats["combinations"] += len(c1) * len(c2)
+            stats["evaluated"] += n_eval
+            stats["cand1"] += len(c1)
+            stats["cand2"] += len(c2)
             continue
         batch.append((name1, c1, c2))
         n_comb += len(c1) * len(c2)
@@ -370,7 +526,10 @@ def reattribute_chunk(job):
             streams = [p.stdout for p in procs]
         with open(job["out"], "w") as out:
             stats = reattribute_stream(streams[0], streams[1], laws, out, rng, job["as_delta"],
-                                       job["error_rate"])
+                                       job["error_rate"],
+                                       max_combinations=job.get("max_combinations", 0),
+                                       near=job.get("near", 100_000),
+                                       n_samples=job.get("n_samples", 256))
         for p in procs:
             if p.wait() != 0:
                 raise RuntimeError(f"bowtie2 failed (see {job['out']}.*.bowtie2.log)")
@@ -383,7 +542,8 @@ def reattribute_chunk(job):
 
 def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 max_alignments="100", as_delta=30, n_workers=1, threads=1, circular=None,
-                bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01):
+                bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01, max_combinations=0,
+                near=100_000, n_samples=256):
     """
     Re-attribute all the group2 chunks of classifier_dir (in parallel, one
     process per chunk) and write output_dir/predicted.pairs.
@@ -396,7 +556,8 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
     output_dir.mkdir(parents=True, exist_ok=True)
     base = dict(stats_dir=str(stats_dir), mode=mode, circular=circular, bin_size=bin_size,
                 index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta,
-                error_rate=error_rate)
+                error_rate=error_rate, max_combinations=max_combinations, near=near,
+                n_samples=n_samples)
     jobs = []
     if sam_pairs:
         for i, (s1, s2) in enumerate(sam_pairs):
@@ -446,7 +607,12 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
         f"placed                : {total['placed']}",
         f"unplaced              : {total['unplaced']} (a mate without alignment)",
         f"candidates per read   : R1 {total['cand1'] / p:.2f}, R2 {total['cand2'] / p:.2f}",
-        f"combinations per pair : {total['combinations'] / p:.2f}",
+        f"combinations per pair : {total['combinations'] / p:.2f} "
+        f"(evaluated {total['evaluated'] / p:.2f})",
+        f"hierarchical draw     : "
+        + (f"{total['sampled']} pairs ({100 * total['sampled'] / p:.1f}%) with > {max_combinations} "
+           f"combinations: near (< {near / 1000:g} kb) exact + {n_samples} importance samples"
+           if max_combinations else "off (all combinations evaluated)"),
         f"placed intra          : {total['intra']} ({100 * total['intra'] / p:.1f}%)",
         f"time                  : {time.time() - t0:.0f} s ({n_workers} workers)",
     ]
@@ -477,11 +643,19 @@ def main():
                         help="Circular chromosomes (default: those of statistics_stats.txt)")
     parser.add_argument("--bin_size", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--max_combinations", type=int, default=0,
+                        help="Pairs with more R1 x R2 combinations are drawn hierarchically (near "
+                             "combinations exact, far ones importance-sampled); 0 = always exact")
+    parser.add_argument("--near", type=int, default=100_000,
+                        help="Hierarchical draw: cis combinations closer than this are exact")
+    parser.add_argument("--n_samples", type=int, default=256,
+                        help="Hierarchical draw: importance samples of the far combinations")
     args = parser.parse_args()
     circular = None if args.circular is None else {c for c in args.circular.split(",") if c}
     reattribute(args.classifier_dir, args.stats_dir, args.output_dir, args.index, args.mode,
                 args.max_alignments, args.as_delta, args.n_workers, args.threads, circular,
-                args.bin_size, args.seed, error_rate=args.error_rate)
+                args.bin_size, args.seed, error_rate=args.error_rate,
+                max_combinations=args.max_combinations, near=args.near, n_samples=args.n_samples)
 
 
 if __name__ == "__main__":

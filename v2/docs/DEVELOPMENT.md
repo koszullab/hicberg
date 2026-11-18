@@ -1083,3 +1083,67 @@ molecules, 60 % of the genome uniquely mappable). Density bin for the
 mosquito now 200 kb (data criterion with 1.08 M pairs, calibrated on the
 45-bin box window: probably too conservative with the Gaussian kernel, to be
 recalibrated). Repeat arcs limited to the 400 strongest per page.
+
+### Mosquito + Wolbachia + yeast genome: when were the libraries mixed? (2026-11-18)
+
+Run `moustic/mosq_wolb_yeast/run` (77 sequences, MM265a reads, `--hicstuff --enzyme DpnII,HinfI`,
+135 min including the repeat links). Group0 (a mate unaligned) falls from 73 % to 17 %; group1 16.5 M
+(23.6 % duplicates), group2 4.5 M (52.1 % duplicates); hicstuff thresholds uncuts 21, loops 15;
+11.9 M unrescued / 15.3 M rescued pairs after hicstuff. The mosquito keeps the same pairs: the
+recovered reads are yeast.
+
+Unrescued pairs (both mates unique, deduplicated) between organisms:
+
+| | mosq nuc | mosq mito | Wolbachia | yeast nuc | yeast mito |
+|---|---|---|---|---|---|
+| mosq nuc | 556,221 | 3,961 | 4,947 | 5,784 | 2,098 |
+| mosq mito | | 8,385 | 302 | 1 | 0 |
+| Wolbachia | | | 502,213 | 18 | 9 |
+| yeast nuc | | | | 14,677,658 | 14,996 |
+
+O/E (coverage product): mosq nuc–Wolbachia 0.14, mosq nuc–yeast 0.006, Wolbachia–yeast < 0.0001.
+Wolbachia is the internal control: it has as many read ends as the mosquito nucleus and was in the
+same tube during ligation; any random process (ligation in a mixed sample, PCR chimeras) would give
+~7,000 yeast–Wolbachia pairs, 27 are observed. The ~7,900 yeast–mosquito pairs are clustered
+(34 % in 1 % of the mosquito 100 kb bins vs 3.5 % for mosquito trans pairs; 27 % on the A+T-rich
+yeast chrMT, which has 5 % of the yeast reads): most likely cross-mapping of A+T-rich sequences,
+not ligation products. Conclusion: the yeast library was mixed after ligation (index collision at
+pooling / sequencing), as suspected from the shared dual index.
+
+### Hierarchical (coarse-to-fine) draw of the pairs with many combinations (2026-11-18)
+
+Problem: the re-attribution evaluates all n1 × n2 combinations of a pair; with -k 1000 instead of
+-k 100 the mean number of candidates per read goes from 45 to 254 on the mosquito (bowtie2 ×8.8) and
+the combinations from ~2,000 to ~64,000 per pair (~×30), i.e. hours. -k 100 itself is not biased
+(mosquito, 36.5 % of the ambiguous reads have > 100 alignments, but the best AS is missed for 1.4 % of
+them and the 100 reported copies are representative: same chromosome shares, same 1 Mb and 5 kb
+distributions as -k 1000, r = 0.97 at 5 kb).
+
+`reattribute_v2.hierarchical_draw` (`--max_combinations N`, default 0 = always exact):
+- near combinations (same chromosome, < `--near` 100 kb, where P(s) varies steeply and where the
+  copies of a repeat often carry both mates): all evaluated exactly (sorted R2 positions per chromosome,
+  cost ~ (n1 + n2) log n + number of near combinations). A block average of P(s) would under-weight them
+  by up to ~1,000× (candidate distances concentrated at short range, not uniform in the block);
+- far combinations: `--n_samples` 256 drawn from a hierarchical proposal — chromosome pair ∝ coarse law
+  (trans P(s) × mean density; intra: mean P(s) beyond `near` × mean density) × Σ alignment weights of
+  the candidates on each chromosome, then candidates ∝ alignment weights — re-weighted by exact weight /
+  proposal probability (importance sampling): unbiased estimate of the far mass, then resampling;
+- near vs far drawn ∝ exact near mass vs estimated far mass.
+
+Validation on yeast (all 5.16 M ambiguous pairs, -a, mode full):
+- per pair (200 real pairs with > 100 combinations, median 408, max 8,432; 400 draws each): total
+  variation to the exact distribution 0.110 (combinations) / 0.101 (10 kb bin pairs) vs 0.112 / 0.103
+  for an exact sampler with the same number of draws; no pair worse by > 0.05;
+- whole maps, pairs with > 20 combinations, distance to the exact run (seed 0):
+
+| | TV 2 kb | TV 10 kb | TV 100 kb | r log 10 kb | intra | cis < 10 kb | trans pairs |
+|---|---|---|---|---|---|---|---|
+| exact, seed 1 | 0.1263 | 0.0471 | 0.0105 | 0.958 | 84.39 % | 63.97 % | 425,335 |
+| hierarchical > 100 comb. (10.5 % of pairs) | 0.1263 | 0.0473 | 0.0105 | 0.958 | 84.38 % | 63.98 % | 425,520 |
+| hierarchical > 20 comb. (52.8 % of pairs) | 0.1265 | 0.0472 | 0.0106 | 0.957 | 84.35 % | 63.97 % | 426,251 |
+
+The hierarchical draw is indistinguishable from re-drawing the exact one with another seed.
+Cost: ~3 ms per pair whatever its size (Python loop per pair) vs ~1.3 µs per combination for the batched
+exact path → only worth it above ~2,500 combinations (yeast runs: exact 951 s, > 100: 1,071 s,
+> 20: 1,570 s). Next: vectorise over batches of pairs, two-resolution density (1 Mb genome-wide + 5 kb
+band near the diagonal) for the human genome at 5 kb, test on the mosquito with -k 1000.

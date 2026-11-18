@@ -131,3 +131,45 @@ def test_many_near_copies_share_the_reads(stats_dir):
     out = io.StringIO()                                                  # error_rate 0: best only
     ra.reattribute_stream(r1, r2, laws, out, np.random.default_rng(0), error_rate=0)
     assert out.getvalue().split("\t")[2] == "1000"
+
+
+@pytest.mark.parametrize("mode", ["ps", "full"])
+def test_hierarchical_draw_matches_exact(stats_dir, mode):
+    # 40 × 40 candidates spread on two chromosomes, some R1/R2 copies close together:
+    # the hierarchical draw (near exact + importance-sampled far) must reproduce the exact
+    # distribution of the chosen combination
+    laws = ra.Laws(stats_dir, mode)
+    rng = np.random.default_rng(3)
+    n = 40
+    c1 = rng.integers(0, 2, n); p1 = rng.integers(1, 99_000, n)
+    c2 = c1.copy(); p2 = np.clip(p1 + rng.integers(-3000, 3000, n), 1, 99_999)
+    c2[::2] = rng.integers(0, 2, n // 2); p2[::2] = rng.integers(1, 99_000, n // 2)
+    r1, r2 = rng.random(n) < .5, rng.random(n) < .5
+    a1, a2 = rng.random(n) + .1, rng.random(n) + .1
+    i1, i2, _, _ = ra.combination_indices([n], [n])
+    w = laws.propensity(c1[i1], p1[i1], r1[i1], c2[i2], p2[i2], r2[i2]) * a1[i1] * a2[i2]
+    exact = w / w.sum()
+    counts = np.zeros(n * n)
+    draws = 6000
+    for s in range(draws):
+        i, j, n_eval = ra.hierarchical_draw(laws, (c1, p1, r1, a1), (c2, p2, r2, a2),
+                                            np.random.default_rng(s), near=10_000, n_samples=64)
+        counts[i * n + j] += 1
+    # total variation between the empirical and exact distributions, vs the sampling noise of
+    # an exact sampler with the same number of draws
+    tv = 0.5 * np.abs(counts / draws - exact).sum()
+    ref = np.bincount(np.random.default_rng(0).choice(n * n, draws, p=exact), minlength=n * n)
+    tv_ref = 0.5 * np.abs(ref / draws - exact).sum()
+    assert tv < tv_ref + 0.03
+    assert n_eval < n * n
+
+
+def test_reattribute_stream_hierarchical_switch(stats_dir):
+    laws = ra.Laws(stats_dir, "full")
+    r1 = [sam("p", 0, "chrA", 10_000, 60)] + [sam("p", 256, "chrB", 1000 + 3000 * k, 60) for k in range(30)]
+    r2 = [sam("p", 16, "chrA", 11_951, 60)] + [sam("p", 256, "chrB", 60_000 + 1000 * k, 60) for k in range(30)]
+    out = io.StringIO()
+    stats = ra.reattribute_stream(r1, r2, laws, out, np.random.default_rng(0), max_combinations=100,
+                                  near=5000, n_samples=64)
+    assert stats["sampled"] == 1 and stats["placed"] == 1 and stats["evaluated"] < 31 * 31
+    assert len(out.getvalue().split("\t")) == 9
