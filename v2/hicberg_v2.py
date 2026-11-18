@@ -11,11 +11,18 @@ Stages (--start_stage / --exit_stage to run a part only):
   stats        statistics_v2: P(s), coverage, density + checkpoint plots
                → stop here (--exit_stage stats) to check the laws, then --start_stage rescue
   rescue       reattribute_v2: group2 re-aligned (-k / -a), pairs drawn → rescued.pairs
-  matrices     optional hicstuff filtering, cooler matrices (ICE), before / after plots
+  matrices     optional hicstuff filtering, cooler matrices (ICE), before / after plots;
+               --data omics: fragment-coverage bigWig tracks before / after (omics_v2)
 
 Example (yeast):
   python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 \\
       --circular plasmid2micron,chrMT --max_alignments all --hicstuff --enzyme DpnII,HinfI
+
+Example (paired-end MNase-seq / ChIP-seq): mode ps (P(s) = fragment-length
+distribution; MNase benchmark: border fragments 100 % right, standard biased by
+its coverage prior inside identical copies), signal tracks in out/omics:
+  python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 --data omics \
+      --fragment_min 100 --fragment_max 1000
 """
 
 import argparse
@@ -78,7 +85,19 @@ def main():
     p.add_argument("--start_stage", choices=STAGES, default=STAGES[0])
     p.add_argument("--exit_stage", choices=STAGES, default=STAGES[-1])
     p.add_argument("--circular", default="", help="Circular chromosomes, e.g. plasmid2micron,chrMT")
-    p.add_argument("--bin_size", type=int, default=2000)
+    p.add_argument("--data", choices=("hic", "omics"), default="hic",
+                   help="hic (default): contact maps; omics: other paired-end data (MNase-seq, ChIP-seq, "
+                        "ATAC-seq, MFA...): mode ps by default, no density, fragment-coverage "
+                        "bigWig tracks before / after instead of the matrices")
+    p.add_argument("--bin_size", type=int, default=None,
+                   help="Bin size of the coverage law (default 2000 for hic, 200 for omics)")
+    p.add_argument("--fragment_min", type=int, default=100,
+                   help="omics: shortest fragment (5' to 5') of the signal tracks (default 100)")
+    p.add_argument("--fragment_max", type=int, default=1000,
+                   help="omics: longest fragment of the signal tracks (default 1000)")
+    p.add_argument("--input_omics", default=None,
+                   help="omics: output folder of the input (control) processed by the pipeline with the "
+                        "same settings → log2(IP / input) tracks before / after in out/omics")
     # mappability
     p.add_argument("--mappability", default="bowtie2",
                    help="bowtie2 (default: k-mers of the read length aligned like the reads), "
@@ -87,6 +106,9 @@ def main():
                    help="A read with a second alignment (XS) but MAPQ >= this value is unique "
                         "(group1), as the MAPQ filter of hicstuff (default 30; -1 = XS only). "
                         "Also used for the bowtie2 mappability")
+    p.add_argument("--dedup_tol", type=int, default=3,
+                   help="Unique pairs: PCR duplicates also removed on their coordinates, both "
+                        "positions within this many bp (as pairtools dedup; default 3, -1 = off)")
     p.add_argument("--mappability_step", type=int, default=10,
                    help="bowtie2 mappability: one k-mer every STEP bp (default 10)")
     p.add_argument("--genmap_errors", type=int, default=2)
@@ -96,7 +118,9 @@ def main():
     # statistics
     p.add_argument("--density_n_min", default="200", help="Density threshold, or 'auto'")
     # rescue
-    p.add_argument("--mode", choices=("random", "ps", "standard", "full"), default="full")
+    p.add_argument("--mode", choices=("random", "ps", "standard", "full"), default=None,
+                   help="Re-attribution: full = P(s) x density (default for hic), ps = P(s) only "
+                        "(default for omics: fragment-length distribution), standard = P(s) x coverage, random")
     p.add_argument("--max_alignments", default="100", help="bowtie2 -k value, or 'all' (-a)")
     p.add_argument("--error_rate", type=float, default=0.01)
     p.add_argument("--as_delta", type=int, default=30)
@@ -124,6 +148,15 @@ def main():
 
     if args.hicstuff and not args.enzyme:
         p.error("--hicstuff needs --enzyme")
+    omics = args.data == "omics"
+    if args.mode is None:
+        args.mode = "ps" if omics else "full"
+    if args.bin_size is None:
+        args.bin_size = 200 if omics else 2000
+    if omics and args.mode == "full":
+        p.error("--data omics: use --mode standard (no 2D density for non-Hi-C data)")
+    if omics:
+        args.repeat_links_step = 0            # arcs of the Hi-C maps only
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -217,7 +250,8 @@ def main():
         import streaming_classifier_v2 as sc
         log("Classifying the pairs ...")
         sc.classify(sam1, sam2, dirs["classifier"], n_cpus=n_chunks,
-                    min_mapq=None if args.min_mapq < 0 else args.min_mapq)
+                    min_mapq=None if args.min_mapq < 0 else args.min_mapq,
+                    dedup_tol=args.dedup_tol)
         if not args.keep_sam:
             sam1.unlink(missing_ok=True)
             sam2.unlink(missing_ok=True)
@@ -233,7 +267,7 @@ def main():
                                else int(args.density_n_min),
                                density_bin_size=args.density_bin_size
                                if args.density_bin_size == "auto" else int(args.density_bin_size),
-                               plot_chroms=plot_chroms)
+                               plot_chroms=plot_chroms, density=args.mode == "full")
         if args.exit_stage == "stats":
             log(f"Checkpoint: check {dirs['statistics'] / 'plots'}, then run again with "
                 f"--start_stage rescue")
@@ -247,8 +281,19 @@ def main():
                        threads=max(1, args.cpus // n_chunks), bin_size=args.bin_size,
                        seed=args.seed, error_rate=args.error_rate)
 
+    # --- omics: signal tracks instead of the matrices ---
+    if omics and run_stage("matrices", args):
+        import omics_v2 as om
+        log("Signal tracks (fragment coverage) before / after ...")
+        om.omics_tracks(dirs["classifier"] / "unrescued.pairs", dirs["rescue"] / "rescued.pairs",
+                        chrom_sizes_file, out / "omics", args.fragment_min, args.fragment_max,
+                        plot_chroms=plot_chroms, mappability=dirs["statistics"] / "mappability.npy")
+        if args.input_omics:
+            log("log2(IP / input) tracks ...")
+            om.ratio_tracks(out / "omics", Path(args.input_omics) / "omics")
+
     # --- matrices ---
-    if run_stage("matrices", args):
+    if not omics and run_stage("matrices", args):
         import matrices_v2 as mx
         dirs["matrices"].mkdir(exist_ok=True)
         unrescued, rescued = dirs["classifier"] / "unrescued.pairs", dirs["rescue"] / "rescued.pairs"

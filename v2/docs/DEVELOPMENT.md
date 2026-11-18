@@ -1147,3 +1147,36 @@ Cost: ~3 ms per pair whatever its size (Python loop per pair) vs ~1.3 µs per co
 exact path → only worth it above ~2,500 combinations (yeast runs: exact 951 s, > 100: 1,071 s,
 > 20: 1,570 s). Next: vectorise over batches of pairs, two-resolution density (1 Mb genome-wide + 5 kb
 band near the diagonal) for the human genome at 5 kb, test on the mosquito with -k 1000.
+
+### PCR jackpots: coordinate dedup (± 3 bp) and capped outlier pixels in the density (2026-11-18)
+
+Mosquito (MM265a, v3 mitochondrion, mode full): a sharp chr1 ~65 Mb × chr3 ~35 Mb spot in the rescued
+1 Mb map, absent from the unrescued one. The density map had a disc of log2 > 3 over ±5 Mb, with a value
+of 62 at its centre, whereas the unique pairs gave O/E 4.2 over 2 × 2 Mb and 1.0 over 10 × 10 Mb. Cause:
+one 200 kb pixel held 104 unique pairs (expected 0.012), all chr3 35,436,681 × chr1 64,930,896–900, same
+strands: copies of a single molecule (PCR jackpot) differing by sequencing errors and 1–4 bp of local-
+alignment clipping, so missed by the sequence dedup; hicstuff (exact coordinates) left 5. The density is
+estimated before hicstuff: the jackpot alone brought the Gaussian kernel to n_min at σ = 1.1 Mb, and the
+re-attribution filled the disc (rescued 1,549 contacts in chr1 60–70 × chr3 30–40 Mb vs 484 in mode
+standard). The region also shares sequence with the chr1 centromere (repeat links), probably an assembly
+issue, but the spot came from the jackpot.
+
+Fixes:
+- `streaming_classifier_v2.dedup_coordinates` (`--dedup_tol 3`, as pairtools dedup --max-mismatch):
+  unique pairs removed when both positions are within 3 bp of a kept pair with the same chromosomes and
+  strands (external sort, any size). Mosquito: 134,279 of 1,075,612 unique pairs (12.5 %).
+- `density_v2.cap_outlier_pixels`: a pixel with > 20 contacts and > 100 × its expected is capped at
+  max(20, 100 × expected) before smoothing (near-diagonal and moderate enrichments untouched).
+
+| rescued contacts | chr1 × chr3 spot | centromeres chr1 62–67 × chr2 110–116 Mb |
+|---|---|---|
+| full, before | 1,549 (1.23 %) | 876 (0.71 %) |
+| standard (P(s) × coverage) | 484 (0.40 %) | 281 (0.23 %) |
+| full, fixed | 556 (0.44 %) | 804 (0.65 %) |
+
+The fixed full mode removes the artefact and keeps the centromere clustering (visible, weaker, in the
+unique pairs), which the standard mode loses; the standard mode also draws stripes (coverage-rich bins
+attract the ambiguous reads). Density at the spot centre: 62 → 1.5.
+
+With the v3 strain mitochondrion, O/E mito–chr3 (unrescued) = 0.039, at the level of chr1 / chr2 (0.033 /
+0.024): the chr3 NUMT artefacts are gone (reference mito 1.72, v1 0.196, v2 0.071).

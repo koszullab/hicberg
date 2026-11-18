@@ -268,3 +268,12 @@ def test_adaptive_gaussian_recovers_enrichment_without_blocks():
     # shrinkage where no kernel reaches n_min (tiny block)
     tiny, s2 = dn.adaptive_gaussian(np.zeros((4, 4)), np.full((4, 4), 0.01), n_min=200)
     assert (s2 == 0).all() and ((tiny > 0.9) & (tiny <= 1.0)).all()   # no contact → ≈ 1
+
+
+def test_cap_outlier_pixels():
+    counts = np.array([[104.0, 1.0], [300.0, 15.0]])
+    expected = np.array([[0.012, 0.01], [5.0, 0.01]])
+    out = dn.cap_outlier_pixels(counts, expected)
+    assert out[0, 0] == 20                      # jackpot: capped
+    assert out[1, 0] == 300                     # near diagonal: 300 < 100 x 5
+    assert out[1, 1] == 15 and out[0, 1] == 1   # below the absolute cap

@@ -151,5 +151,20 @@ def test_group1_pcr_duplicates_removed_on_sequences(tmp_path):
     sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
     rows = [l.split("\t")[0] for l in (tmp_path / "out" / "unrescued.pairs").read_text().splitlines()
             if not l.startswith("#")]
-    assert rows == ["u1", "u3"]
+    assert sorted(rows) == ["u1", "u3"]          # file sorted by the coordinate dedup
     assert "group1 dup. : 1" in (tmp_path / "out" / "stats.txt").read_text()
+
+
+def test_dedup_coordinates_tolerance(tmp_path):
+    p = tmp_path / "u.pairs"
+    rows = ["## pairs format v1.0\n", "#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n"]
+    # a jackpot: 5 copies within 2 bp; an unrelated pair 10 bp away; another strand; another chrom
+    for k, (a, b) in enumerate([(1000, 5000), (1001, 5000), (1000, 5002), (999, 4999), (1002, 5001)]):
+        rows.append(f"j{k}\tchrA\t{a}\tchrB\t{b}\t+\t+\n")
+    rows += ["x\tchrA\t1012\tchrB\t5000\t+\t+\n", "y\tchrA\t1000\tchrB\t5000\t-\t+\n",
+             "z\tchrA\t1000\tchrC\t5000\t+\t+\n"]
+    p.write_text("".join(rows))
+    n_in, n_dup = sc.dedup_coordinates(p, tol=3)
+    assert (n_in, n_dup) == (8, 4)
+    kept = [l for l in p.read_text().splitlines() if not l.startswith("#")]
+    assert len(kept) == 4 and p.read_text().startswith("## pairs format")

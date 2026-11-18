@@ -352,6 +352,22 @@ def _box3(x, sigma):
     return y, float((k ** 2).sum()) ** 2
 
 
+def cap_outlier_pixels(counts, expected, cap=20, ratio=100):
+    """
+    Pixels with more than `cap` contacts AND more than `ratio` × their expected are
+    capped at max(cap, ratio × expected) before smoothing: a single pixel then cannot
+    bring the kernel to n_min contacts on its own (mosquito: one PCR jackpot of 104
+    copies in a chr1 x chr3 pixel whose expected was 0.012 gave a density of 62 over
+    a ~5 Mb disc). Near-diagonal pixels (large expected) and moderate far-cis / trans
+    enrichments (telomere-telomere, centromere clustering) are untouched.
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    e = np.where(np.isfinite(expected), expected, 0.0)
+    limit = np.maximum(cap, ratio * e)
+    out = np.where(np.isfinite(counts) & (counts > limit), limit, counts)
+    return out
+
+
 def adaptive_gaussian(obs, expected, n_min=200, sigmas=GAUSSIAN_SIGMAS):
     """
     Density = smoothed observed / smoothed expected, with a Gaussian-like
@@ -447,7 +463,7 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     elif smoothing == "gaussian":
         if expected is None:
             raise ValueError("smoothing 'gaussian' needs method 'unbiased'")
-        smooth, _ = adaptive_gaussian(counts, expected, n_min)
+        smooth, _ = adaptive_gaussian(cap_outlier_pixels(counts, expected), expected, n_min)
         smooth = np.clip(np.where(np.isfinite(smooth), smooth, 1.0), 0, None)
     else:
         raise ValueError(f"Unknown density smoothing: {smoothing}")

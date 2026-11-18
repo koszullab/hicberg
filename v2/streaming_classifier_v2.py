@@ -19,9 +19,11 @@ Outputs:
                                at bowtie2's random best position), 100-bp bins
 """
 
+import os
 import sys
 import re
 import argparse
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -325,7 +327,7 @@ def write_fastq_record(fh, query_name, sequence, qualities):
 
 def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
              threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False,
-             dedup=True, min_mapq=30):
+             dedup=True, min_mapq=30, dedup_tol=3):
     """
     coverage_all_reads: also count the 5' positions of all aligned reads
     (coverage_all_reads.npz, ~+25% time), used by statistics_v2.py
@@ -342,6 +344,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     ~70 bytes per pair: ~3 GB for 40 M pairs).
     min_mapq: a read with an XS tag but MAPQ >= min_mapq is unique (group1
     if its mate is too); None = XS only.
+    dedup_tol: then, the unique pairs are also deduplicated on their
+    coordinates with this tolerance (dedup_coordinates, as pairtools dedup);
+    < 0 = off.
     """
 
     output_dir = Path(output_dir)
@@ -514,6 +519,12 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     for fh in g2_r1_files + g2_r2_files:
         fh.close()
 
+    # --- PCR duplicates of the unique pairs on their coordinates (± dedup_tol bp) ---
+    if dedup and dedup_tol is not None and dedup_tol >= 0:
+        _, stats['dup_coord'] = dedup_coordinates(output_dir / "unrescued.pairs", dedup_tol,
+                                                  tmp_dir=output_dir)
+        stats['group1'] -= stats['dup_coord']
+
     # --- Write stats ---
     with open(output_dir / "stats.txt", 'w') as fs:
         fs.write(f"total_pairs : {stats['total_pairs']}\n")
@@ -528,6 +539,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                 d = stats[f"dup_{g}"]
                 fs.write(f"{g} dup. : {d}  ({100*d/max(d + stats[g], 1):.1f}% of the {g} pairs: "
                          f"identical R1 + R2 sequences, removed)\n")
+        if 'dup_coord' in stats:
+            fs.write(f"group1 coord. dup. : {stats['dup_coord']}  (same chromosomes and strands, "
+                     f"both positions within {dedup_tol} bp of a kept pair, removed)\n")
         fs.write(f"chimeric_r1 : {stats['chimeric_r1']}\n")
         fs.write(f"chimeric_r2 : {stats['chimeric_r2']}\n")
 
@@ -535,6 +549,54 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     print("\n=== Classification stats ===")
     with open(output_dir / "stats.txt") as fs:
         print(fs.read())
+
+
+def dedup_coordinates(pairs_path, tol=3, tmp_dir=None):
+    """
+    Remove the pairs whose two 5' positions are both within `tol` bp of an earlier
+    pair with the same chromosomes and strands (as pairtools dedup --max-mismatch,
+    default 3). Catches the PCR "jackpots" missed by the sequence dedup: copies of one
+    molecule that differ by sequencing errors and by 1-4 bp of local-alignment clipping
+    (mosquito: 104 copies of one chr1 x chr3 pair, at 5 positions within 4 bp, made a
+    density hotspot). The file is sorted externally (GNU sort, any size) and rewritten
+    in place. Returns (pairs read, pairs removed).
+    """
+    pairs_path = Path(pairs_path)
+    header, n_in, n_dup = [], 0, 0
+    with open(pairs_path) as fh:
+        for line in fh:
+            if not line.startswith("#"):
+                break
+            header.append(line)
+    tmp = pairs_path.with_suffix(".sorted.tmp")
+    env = dict(os.environ, LC_ALL="C")
+    cmd = ["sort", "-t", "\t", "-k2,2", "-k4,4", "-k6,6", "-k7,7", "-k3,3n", "-k5,5n",
+           "-S", "2G", "-o", str(tmp)]
+    if tmp_dir:
+        cmd += ["-T", str(tmp_dir)]
+    grep = subprocess.Popen(["grep", "-v", "^#", str(pairs_path)], stdout=subprocess.PIPE)
+    subprocess.run(cmd, stdin=grep.stdout, check=True, env=env)
+    grep.wait()
+    out_path = pairs_path.with_suffix(".dedup.tmp")
+    with open(tmp) as fh, open(out_path, "w") as out:
+        out.writelines(header)
+        group, window = None, []
+        for line in fh:
+            f = line.split("\t", 7)
+            key = (f[1], f[3], f[5], f[6].rstrip("\n"))
+            p1, p2 = int(f[2]), int(f[4])
+            n_in += 1
+            if key != group:
+                group, window = key, []
+            window = [w for w in window if p1 - w[0] <= tol]
+            if any(abs(p2 - w[1]) <= tol for w in window):
+                n_dup += 1
+                continue
+            window.append((p1, p2))
+            out.write(line)
+    tmp.unlink()
+    out_path.replace(pairs_path)
+    return n_in, n_dup
 
 
 # ---------------------------------------------------------------------------
