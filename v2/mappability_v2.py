@@ -113,12 +113,12 @@ def _write_kmers(genome, kmer, step, stdin):
         stdin.close()
 
 
-def bowtie2_mappability(genome, index, output_dir, kmer, step=10, threads=8):
+def bowtie2_mappability(genome, index, output_dir, kmer, step=10, threads=8, min_mapq=30):
     """
     Mappability with the aligner of the pipeline. Every `step` bp, the k-mer
     starting there is aligned (bowtie2 --very-sensitive-local, the mode of the
-    first alignment); it is mappable if it aligns without XS tag (no second
-    alignment: the criterion that sends a read to group1). Unaligned k-mers,
+    first alignment); it is mappable if it aligns without XS tag, or with an
+    XS but MAPQ >= min_mapq: the criterion that sends a read to group1. Unaligned k-mers,
     k-mers with N and ambiguous k-mers are not mappable.
     Output: bedgraph (0-based, half-open), score 1 over [p, min(p + step, L))
     for each mappable k-mer start p, consecutive intervals merged; positions
@@ -131,7 +131,8 @@ def bowtie2_mappability(genome, index, output_dir, kmer, step=10, threads=8):
         raise RuntimeError("bowtie2 not found in PATH")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    out = output_dir / f"bowtie2_K{kmer}_S{step}.bedgraph"
+    out = output_dir / (f"bowtie2_K{kmer}_S{step}.bedgraph" if min_mapq is None
+                        else f"bowtie2_K{kmer}_S{step}_Q{min_mapq}.bedgraph")
     tmp = out.with_suffix(".bedgraph.tmp")
     cmd = ["bowtie2", "-f", *BOWTIE2_MODE, "--reorder", "--no-hd", "--no-unal",
            "-p", str(threads), "-x", str(index), "-U", "-"]
@@ -145,8 +146,10 @@ def bowtie2_mappability(genome, index, output_dir, kmer, step=10, threads=8):
     with open(tmp, "w") as fh:
         for line in proc.stdout:
             # read name "chrom:pos" (pos 0-based start of the k-mer)
-            f = line.split("\t", 2)
-            if int(f[1]) & 4 or "XS:i:" in line:
+            f = line.split("\t", 5)
+            if int(f[1]) & 4:
+                continue
+            if "XS:i:" in line and (min_mapq is None or int(f[4]) < min_mapq):
                 continue
             chrom, p = f[0].rsplit(":", 1)
             p = int(p)

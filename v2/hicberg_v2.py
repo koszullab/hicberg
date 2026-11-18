@@ -83,6 +83,10 @@ def main():
     p.add_argument("--mappability", default="bowtie2",
                    help="bowtie2 (default: k-mers of the read length aligned like the reads), "
                         "genmap, none (trapezoid areas), or the path of an existing bedgraph")
+    p.add_argument("--min_mapq", type=int, default=30,
+                   help="A read with a second alignment (XS) but MAPQ >= this value is unique "
+                        "(group1), as the MAPQ filter of hicstuff (default 30; -1 = XS only). "
+                        "Also used for the bowtie2 mappability")
     p.add_argument("--mappability_step", type=int, default=10,
                    help="bowtie2 mappability: one k-mer every STEP bp (default 10)")
     p.add_argument("--genmap_errors", type=int, default=2)
@@ -166,7 +170,9 @@ def main():
     elif args.mappability != "none":
         k = read_length(args.fastq1)
         if args.mappability == "bowtie2":
-            bedgraph = dirs["mappability"] / f"bowtie2_K{k}_S{args.mappability_step}.bedgraph"
+            bedgraph = dirs["mappability"] / (
+                f"bowtie2_K{k}_S{args.mappability_step}.bedgraph" if args.min_mapq < 0
+                else f"bowtie2_K{k}_S{args.mappability_step}_Q{args.min_mapq}.bedgraph")
         else:
             bedgraph = dirs["mappability"] / f"genmap_K{k}_E{args.genmap_errors}.bedgraph"
         if run_stage("mappability", args) and not bedgraph.is_file():
@@ -176,7 +182,8 @@ def main():
                     p.error(f"bowtie2 index {index} not found (needed by the mappability)")
                 log(f"bowtie2 mappability (k = {k}, one k-mer every {args.mappability_step} bp) ...")
                 bedgraph = mp.bowtie2_mappability(args.genome, index, dirs["mappability"], k,
-                                                  args.mappability_step, args.cpus)
+                                                  args.mappability_step, args.cpus,
+                                                  None if args.min_mapq < 0 else args.min_mapq)
             else:
                 log(f"GenMap mappability (k = {k}, {args.genmap_errors} errors) ...")
                 bedgraph = mp.run_genmap(args.genome, dirs["mappability"], k, args.genmap_errors,
@@ -209,7 +216,8 @@ def main():
     if run_stage("classify", args):
         import streaming_classifier_v2 as sc
         log("Classifying the pairs ...")
-        sc.classify(sam1, sam2, dirs["classifier"], n_cpus=n_chunks)
+        sc.classify(sam1, sam2, dirs["classifier"], n_cpus=n_chunks,
+                    min_mapq=None if args.min_mapq < 0 else args.min_mapq)
         if not args.keep_sam:
             sam1.unlink(missing_ok=True)
             sam2.unlink(missing_ok=True)

@@ -191,6 +191,18 @@ def has_xs_tag(tags):
     return tags.startswith('XS:') or '\tXS:' in tags
 
 
+def is_unique(fields, min_mapq=30):
+    """
+    Read considered uniquely placed: no XS tag (no second alignment), or
+    MAPQ >= min_mapq although an XS exists (bowtie2: the second alignment is
+    clearly worse; the usual filter of hicstuff and of most Hi-C pipelines).
+    min_mapq None: XS criterion only (previous behaviour).
+    """
+    if not has_xs_tag(fields[11]):
+        return True
+    return min_mapq is not None and int(fields[4]) >= min_mapq
+
+
 def reference_length(cigar_str):
     """Number of reference bases covered by the alignment (M/D/N/=/X)."""
     if cigar_str[:-1].isdigit() and cigar_str[-1] == 'M':   # e.g. '36M'
@@ -312,11 +324,24 @@ def write_fastq_record(fh, query_name, sequence, qualities):
 # ---------------------------------------------------------------------------
 
 def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
-             threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False):
+             threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False,
+             dedup=True, min_mapq=30):
     """
     coverage_all_reads: also count the 5' positions of all aligned reads
     (coverage_all_reads.npz, ~+25% time), used by statistics_v2.py
     --coverage_all_reads to estimate the coverage of unmappable bins.
+    dedup: PCR duplicates removed on the sequences, the same way for the
+    unique (group1) and the ambiguous (group2) pairs: one pair kept per
+    identical (R1, R2) sequence pair (in the sequenced orientation; reads
+    with sequencing errors are not merged). Needed before the
+    re-attribution: the copies of a duplicated ambiguous pair are otherwise
+    drawn independently, land at different positions and are no longer seen
+    as duplicates on their coordinates (mosquito: 46.6 % of the group2 pairs
+    were exact duplicates, 57 % of the extra copies ended at another
+    position). Memory: one 64-bit hash per mapped pair kept (Python set,
+    ~70 bytes per pair: ~3 GB for 40 M pairs).
+    min_mapq: a read with an XS tag but MAPQ >= min_mapq is unique (group1
+    if its mate is too); None = XS only.
     """
 
     output_dir = Path(output_dir)
@@ -353,8 +378,11 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         'group2':         0,
         'chimeric_r1':    0,
         'chimeric_r2':    0,
+        'dup_group1':     0,
+        'dup_group2':     0,
         'chunk_index':    0,   # round-robin counter for splitting
     }
+    seen = set()             # hashes of the (R1, R2) sequences of the pairs kept
 
     cov_all = AllReadsCoverage(sam_chrom_sizes(sam1_path)) if coverage_all_reads else None
 
@@ -392,10 +420,24 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                 stats['group0'] += 1
                 continue
 
+            unique = is_unique(f1, min_mapq) and is_unique(f2, min_mapq)
+
             # ----------------------------------------------------------------
-            # GROUP 1 — both uniquely mapped (no XS)
+            # PCR duplicates: identical (R1, R2) sequences, sequenced orientation
             # ----------------------------------------------------------------
-            if not has_xs_tag(f1[11]) and not has_xs_tag(f2[11]):
+            if dedup:
+                s1 = f1[9].translate(_REVCOMP)[::-1] if flag1 & 16 else f1[9]
+                s2 = f2[9].translate(_REVCOMP)[::-1] if flag2 & 16 else f2[9]
+                key = hash((s1, s2))
+                if key in seen:
+                    stats['dup_group1' if unique else 'dup_group2'] += 1
+                    continue
+                seen.add(key)
+
+            # ----------------------------------------------------------------
+            # GROUP 1 — both uniquely mapped (no XS, or MAPQ >= min_mapq)
+            # ----------------------------------------------------------------
+            if unique:
                 rev1, rev2 = bool(flag1 & 16), bool(flag2 & 16)
                 if cov_all is None:
                     pos1, pos2 = fast_outer_5prime(f1, rev1), fast_outer_5prime(f2, rev2)
@@ -413,8 +455,6 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             # ----------------------------------------------------------------
             r1, r2 = parse_sam_line(line1), parse_sam_line(line2)
             stats['group2'] += 1
-            chunk_idx = stats['chunk_index'] % n_cpus
-            stats['chunk_index'] += 1
 
             # Process r1
             seq1  = r1['sequence']
@@ -459,6 +499,8 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             # Write to group2 FASTQ chunks, reads in their sequenced orientation
             seq1, qual1 = original_orientation(seq1, qual1, r1['is_reverse'])
             seq2, qual2 = original_orientation(seq2, qual2, r2['is_reverse'])
+            chunk_idx = stats['chunk_index'] % n_cpus
+            stats['chunk_index'] += 1
             write_fastq_record(g2_r1_files[chunk_idx], r1['query_name'], seq1, qual1)
             write_fastq_record(g2_r2_files[chunk_idx], r2['query_name'], seq2, qual2)
 
@@ -481,6 +523,11 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                  f"({100*stats['group1']/max(stats['total_pairs'],1):.1f}%)\n")
         fs.write(f"group2      : {stats['group2']}  "
                  f"({100*stats['group2']/max(stats['total_pairs'],1):.1f}%)\n")
+        if dedup:
+            for g in ("group1", "group2"):
+                d = stats[f"dup_{g}"]
+                fs.write(f"{g} dup. : {d}  ({100*d/max(d + stats[g], 1):.1f}% of the {g} pairs: "
+                         f"identical R1 + R2 sequences, removed)\n")
         fs.write(f"chimeric_r1 : {stats['chimeric_r1']}\n")
         fs.write(f"chimeric_r2 : {stats['chimeric_r2']}\n")
 
@@ -524,6 +571,11 @@ def main():
              "statistics_v2.py --coverage_all_reads"
     )
 
+    parser.add_argument(
+        "--min_mapq", type=int, default=30,
+        help="A read with an XS tag but MAPQ >= this value is unique (default=30; "
+             "-1 = XS criterion only)"
+    )
     args = parser.parse_args()
 
     classify(
@@ -535,6 +587,7 @@ def main():
         threshold_clip    = args.threshold_clip,
         min_aligned_frac  = args.min_aligned_frac,
         coverage_all_reads = args.coverage_all_reads,
+        min_mapq          = None if args.min_mapq < 0 else args.min_mapq,
     )
 
 

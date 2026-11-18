@@ -103,3 +103,53 @@ def test_group2_fastq_keeps_the_sequenced_orientation(tmp_path):
     fq2 = (tmp_path / "out" / "group2_2_chunk0.fastq").read_text().splitlines()
     assert fq1[1] == sequenced and fq1[3] == qual
     assert fq2[1] == "A" * 48
+
+
+def test_group2_pcr_duplicates_removed_before_rescue(tmp_path):
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n"
+    seqA, seqB = "ACGT" * 12, "TTGCA" * 9 + "ACG"
+    def line(name, seq, flag=0, pos=500, xs=True):
+        tags = ["AS:i:96", "XS:i:96"] if xs else ["AS:i:96"]
+        return "\t".join([name, str(flag), "chr1", str(pos), "1", f"{len(seq)}M", "*", "0", "0",
+                          seq, "I" * len(seq)] + tags) + "\n"
+    r1 = [line("p1", seqA), line("p2", seqA), line("p3", seqA)]          # p2 = PCR duplicate of p1
+    r2 = [line("p1", seqB, pos=9000, xs=False), line("p2", seqB, pos=9000, xs=False),
+          line("p3", "G" * 48, pos=9000, xs=False)]                       # p3: different R2
+    (tmp_path / "1.sam").write_text(head + "".join(r1))
+    (tmp_path / "2.sam").write_text(head + "".join(r2))
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
+    names = (tmp_path / "out" / "group2_1_chunk0.fastq").read_text().splitlines()[::4]
+    assert names == ["@p1", "@p3"]
+    assert "group2 dup. : 1" in (tmp_path / "out" / "stats.txt").read_text()
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "keep", n_cpus=1, dedup=False)
+    assert len((tmp_path / "keep" / "group2_1_chunk0.fastq").read_text().splitlines()) == 12
+
+
+def test_is_unique_mapq():
+    f = sc.split_sam(sam_line(0, 100, "50M", ["AS:i:-5", "XS:i:-30"]))
+    f[4] = "42"
+    assert sc.is_unique(f, 30) and not sc.is_unique(f, None)
+    f[4] = "1"
+    assert not sc.is_unique(f, 30)
+    g = sc.split_sam(sam_line(0, 100, "50M", ["AS:i:-5"]))
+    g[4] = "0"
+    assert sc.is_unique(g, 30)                    # no XS: unique whatever the MAPQ
+
+
+def test_group1_pcr_duplicates_removed_on_sequences(tmp_path):
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n"
+    seqA, seqB = "ACGT" * 12, "TTGCA" * 9 + "ACG"
+    def line(name, seq, flag=0, pos=500):
+        return "\t".join([name, str(flag), "chr1", str(pos), "42", f"{len(seq)}M", "*", "0", "0",
+                          seq, "I" * len(seq), "AS:i:96"]) + "\n"
+    rc = lambda x: x.translate(str.maketrans("ACGT", "TGCA"))[::-1]
+    # u1, u2: same molecule (u2 seen on the other strand in the SAM: same sequenced reads)
+    r1 = [line("u1", seqA), line("u2", seqA), line("u3", seqA)]
+    r2 = [line("u1", rc(seqB), 16, 9000), line("u2", rc(seqB), 16, 9000), line("u3", "G" * 48, 0, 9000)]
+    (tmp_path / "1.sam").write_text(head + "".join(r1))
+    (tmp_path / "2.sam").write_text(head + "".join(r2))
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
+    rows = [l.split("\t")[0] for l in (tmp_path / "out" / "unrescued.pairs").read_text().splitlines()
+            if not l.startswith("#")]
+    assert rows == ["u1", "u3"]
+    assert "group1 dup. : 1" in (tmp_path / "out" / "stats.txt").read_text()

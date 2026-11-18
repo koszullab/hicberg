@@ -1041,3 +1041,45 @@ over-smooths near the diagonal. Visual: no square blocks, structures
 continuous, far field with large domains (less shrinkage to 1), telomere
 corners kept (`moustic/density_box_vs_gaussian.pdf`). Now the default of
 statistics_v2 and of the n_min calibration (`smoothing="gaussian"`).
+
+### PCR duplicates on the sequences, MAPQ >= 30 = unique (2026-11-16)
+
+**Duplicates.** The copies of a PCR-duplicated ambiguous pair were drawn
+independently by the re-attribution (mosquito: ~2000 combinations per
+pair), so they landed at different positions and hicstuff (coordinates) no
+longer saw them: in group2, 46.6 % of the pairs were exact sequence
+duplicates and 57 % of the extra copies ended elsewhere, counted as new
+contacts (mosquito rescued ×7.9 vs unrescued, chr1 ×11). Now the classifier
+keeps one pair per identical (R1, R2) sequence pair (sequenced
+orientation), the same way for group1 and group2, before the re-attribution
+(`dedup=True`; one 64-bit hash per pair in memory, ~70 bytes: a sorted
+on-disk version will be needed for human). hicstuff's coordinate filter is
+kept for both (catches duplicates with sequencing errors).
+
+**Unique = no XS, or XS with MAPQ >= 30** (`--min_mapq 30`, -1 = XS only),
+as the MAPQ filter of hicstuff, so that the unrescued maps compare with the
+standard pipeline; the bowtie2 mappability uses the same criterion
+(`bowtie2_K{k}_S{step}_Q30.bedgraph`). Mappable genome: yeast 91.3 → 92.8 %,
+mosquito 43.6 → 60.3 %.
+
+Results:
+
+| | yeast AC1 | mosquito MM265a |
+|---|---|---|
+| group1 / group2 before dedup | 37.31 M / 6.32 M | 3.90 M / 6.01 M |
+| sequence duplicates group1 / group2 | 16.3 % / 18.3 % | 72.4 % / 71.5 % |
+| kept group1 / group2 | 31.23 M / 5.16 M | 1.08 M / 1.71 M |
+| hicstuff PCR duplicates after | 2 % / 2 % | 10 % / 5 % |
+| contacts unrescued → rescued | 24.15 M → 28.26 M (×1.17) | 0.63 M → 2.01 M (×3.2) |
+| previous run | 23.67 → 28.86 (×1.22) | 0.51 → 4.01 (×7.9) |
+| re-attribution | 21 min (3 workers) | 27 min (was 67) |
+
+Yeast check: median rescued / unrescued coverage in well-mappable bins
+1.047; unmappable bins (excluding the rDNA) reconstructed at 0.92 × the
+median (0.94 before; 0.93 expected). The mosquito library is of low
+complexity (~2.8 M distinct molecules aligned on mosquito + Wolbachia out of
+37 M pairs); the ×3.2 left is real (1.71 M ambiguous vs 1.08 M unique
+molecules, 60 % of the genome uniquely mappable). Density bin for the
+mosquito now 200 kb (data criterion with 1.08 M pairs, calibrated on the
+45-bin box window: probably too conservative with the Gaussian kernel, to be
+recalibrated). Repeat arcs limited to the 400 strongest per page.

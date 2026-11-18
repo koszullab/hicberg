@@ -297,7 +297,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                       sites=None, enzyme_label="restriction sites", chrom_pairs=None,
                       intra_only=False, vmin_raw=None, vmax_raw=None,
                       labels=("unrescued", "rescued"), repeat_links=None, min_link_kmers=3,
-                      max_arcs=3000):
+                      max_arcs=400):
     """
     Two multi-page PDFs (matrices_raw.pdf, matrices_normalised.pdf), one page
     per pair of chromosomes (all pairs, or intra only, or chrom_pairs), as in
