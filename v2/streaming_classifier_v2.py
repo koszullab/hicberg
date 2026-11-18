@@ -193,6 +193,23 @@ def has_xs_tag(tags):
     return tags.startswith('XS:') or '\tXS:' in tags
 
 
+ADAPTER_CORE = "GATCGGAAGAGC"     # Illumina TruSeq / Nextera-free universal adapter, "AGATCGGAAGAGC"
+
+
+def insert_length(seq, core=ADAPTER_CORE):
+    """
+    Length of the genomic insert of a read (sequenced orientation): the read
+    length, or the position where the Illumina adapter starts (read-through of a
+    short fragment). The adapter is AGATCGGAAGAGC...; its first A may be missing
+    (adapter dimers), so the core GATCGGAAGAGC is searched and the A before it,
+    if any, counted in the adapter.
+    """
+    i = seq.find(core)
+    if i < 0:
+        return len(seq)
+    return i - 1 if i > 0 and seq[i - 1] == "A" else i
+
+
 def is_unique(fields, min_mapq=30):
     """
     Read considered uniquely placed: no XS tag (no second alignment), or
@@ -327,7 +344,7 @@ def write_fastq_record(fh, query_name, sequence, qualities):
 
 def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
              threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False,
-             dedup=True, min_mapq=30, dedup_tol=3):
+             dedup=True, min_mapq=30, dedup_tol=3, min_insert=20):
     """
     coverage_all_reads: also count the 5' positions of all aligned reads
     (coverage_all_reads.npz, ~+25% time), used by statistics_v2.py
@@ -344,6 +361,11 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     ~70 bytes per pair: ~3 GB for 40 M pairs).
     min_mapq: a read with an XS tag but MAPQ >= min_mapq is unique (group1
     if its mate is too); None = XS only.
+    min_insert: a read whose Illumina adapter starts before this position
+    (insert < min_insert bp: adapter dimers, tiny fragments) is treated as
+    unmapped (group0): such reads align uniquely to adapter pieces left in some
+    assemblies (mosquito chr3 35,436,681: 1,246 false contacts with the whole
+    genome). Longer inserts are kept (local alignment clips the adapter). 0 = off.
     dedup_tol: then, the unique pairs are also deduplicated on their
     coordinates with this tolerance (dedup_coordinates, as pairtools dedup);
     < 0 = off.
@@ -385,6 +407,7 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         'chimeric_r2':    0,
         'dup_group1':     0,
         'dup_group2':     0,
+        'adapter':        0,
         'chunk_index':    0,   # round-robin counter for splitting
     }
     seen = set()             # hashes of the (R1, R2) sequences of the pairs kept
@@ -424,6 +447,16 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                 f_group0.write(f1[0] + '\n')
                 stats['group0'] += 1
                 continue
+
+            # adapter read-through: insert too short to be placed → unmapped
+            if min_insert:
+                s1 = f1[9].translate(_REVCOMP)[::-1] if flag1 & 16 else f1[9]
+                s2 = f2[9].translate(_REVCOMP)[::-1] if flag2 & 16 else f2[9]
+                if insert_length(s1) < min_insert or insert_length(s2) < min_insert:
+                    f_group0.write(f1[0] + '\n')
+                    stats['group0'] += 1
+                    stats['adapter'] += 1
+                    continue
 
             unique = is_unique(f1, min_mapq) and is_unique(f2, min_mapq)
 
@@ -542,6 +575,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         if 'dup_coord' in stats:
             fs.write(f"group1 coord. dup. : {stats['dup_coord']}  (same chromosomes and strands, "
                      f"both positions within {dedup_tol} bp of a kept pair, removed)\n")
+        if min_insert:
+            fs.write(f"adapter     : {stats['adapter']}  (a read with < {min_insert} bp before the "
+                     f"Illumina adapter: counted in group0)\n")
         fs.write(f"chimeric_r1 : {stats['chimeric_r1']}\n")
         fs.write(f"chimeric_r2 : {stats['chimeric_r2']}\n")
 

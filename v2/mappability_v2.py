@@ -113,6 +113,31 @@ def _write_kmers(genome, kmer, step, stdin):
         stdin.close()
 
 
+ADAPTERS = {"TruSeq read 1 adapter": "GATCGGAAGAGCACACGTC",
+            "TruSeq read 2 adapter": "GATCGGAAGAGCGTCGTGT"}
+
+
+def adapter_sites(genome, adapters=ADAPTERS):
+    """
+    Positions (chrom, 1-based start, strand, name) of Illumina adapter pieces (19 bp,
+    both strands, case-insensitive) in an assembly. Reads made of adapter (adapter
+    dimers, tiny inserts) align uniquely to them and create false contacts with the
+    whole genome (mosquito: chr3 35,436,681 inside a satellite).
+    """
+    rc = str.maketrans("ACGTN", "TGCAN")
+    probes = [(n, "+", a) for n, a in adapters.items()] + \
+             [(n, "-", a.translate(rc)[::-1]) for n, a in adapters.items()]
+    hits = []
+    for chrom, seq in iter_fasta(genome):
+        seq = seq.upper()
+        for name, strand, probe in probes:
+            i = seq.find(probe)
+            while i >= 0:
+                hits.append((chrom, i + 1, strand, name))
+                i = seq.find(probe, i + 1)
+    return sorted(hits)
+
+
 def bowtie2_mappability(genome, index, output_dir, kmer, step=10, threads=8, min_mapq=30):
     """
     Mappability with the aligner of the pipeline. Every `step` bp, the k-mer

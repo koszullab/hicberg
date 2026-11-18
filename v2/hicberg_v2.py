@@ -18,9 +18,11 @@ Example (yeast):
   python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 \\
       --circular plasmid2micron,chrMT --max_alignments all --hicstuff --enzyme DpnII,HinfI
 
-Example (paired-end MNase-seq / ChIP-seq): mode ps (P(s) = fragment-length
-distribution; MNase benchmark: border fragments 100 % right, standard biased by
-its coverage prior inside identical copies), signal tracks in out/omics:
+Example (paired-end MNase-seq / ChIP-seq): mode ps by default (P(s) = fragment-length
+distribution: fragments crossing the border of a repeat placed 100 % right); for peaked
+ChIP-seq use --mode standard (the coverage prior puts the peaks back on the right copy;
+benchmarks in DEVELOPMENT.md); process the input the same way and pass it with
+--input_omics to get log2(IP / input) tracks. Signal tracks in out/omics:
   python3 hicberg_v2.py genome.fa R1.fq.gz R2.fq.gz -o out --cpus 16 --data omics \
       --fragment_min 100 --fragment_max 1000
 """
@@ -87,7 +89,8 @@ def main():
     p.add_argument("--circular", default="", help="Circular chromosomes, e.g. plasmid2micron,chrMT")
     p.add_argument("--data", choices=("hic", "omics"), default="hic",
                    help="hic (default): contact maps; omics: other paired-end data (MNase-seq, ChIP-seq, "
-                        "ATAC-seq, MFA...): mode ps by default, no density, fragment-coverage "
+                        "ATAC-seq, MFA...): mode ps by default (uniform signals); use --mode standard for "
+                        "peaked ChIP-seq (benchmarks in DEVELOPMENT.md), no density, fragment-coverage "
                         "bigWig tracks before / after instead of the matrices")
     p.add_argument("--bin_size", type=int, default=None,
                    help="Bin size of the coverage law (default 2000 for hic, 200 for omics)")
@@ -106,6 +109,9 @@ def main():
                    help="A read with a second alignment (XS) but MAPQ >= this value is unique "
                         "(group1), as the MAPQ filter of hicstuff (default 30; -1 = XS only). "
                         "Also used for the bowtie2 mappability")
+    p.add_argument("--min_insert", type=int, default=20,
+                   help="Reads whose Illumina adapter starts before this position (adapter dimers, "
+                        "tiny inserts) are treated as unmapped (default 20; 0 = off)")
     p.add_argument("--dedup_tol", type=int, default=3,
                    help="Unique pairs: PCR duplicates also removed on their coordinates, both "
                         "positions within this many bp (as pairtools dedup; default 3, -1 = off)")
@@ -120,7 +126,9 @@ def main():
     # rescue
     p.add_argument("--mode", choices=("random", "ps", "standard", "full"), default=None,
                    help="Re-attribution: full = P(s) x density (default for hic), ps = P(s) only "
-                        "(default for omics: fragment-length distribution), standard = P(s) x coverage, random")
+                        "(default for omics: fragment-length distribution; best for uniform signals such as "
+                        "MNase-seq), standard = P(s) x coverage (best for peaked ChIP-seq: peaks back on the "
+                        "right copy, contrast exaggerated), random")
     p.add_argument("--max_alignments", default="100", help="bowtie2 -k value, or 'all' (-a)")
     p.add_argument("--error_rate", type=float, default=0.01)
     p.add_argument("--as_delta", type=int, default=30)
@@ -222,6 +230,18 @@ def main():
                 bedgraph = mp.run_genmap(args.genome, dirs["mappability"], k, args.genmap_errors,
                                          args.cpus)
 
+    # Illumina adapter pieces left in the assembly (reads of adapter align there)
+    if run_stage("mappability", args):
+        import mappability_v2 as mp
+        hits = mp.adapter_sites(args.genome)
+        dirs["mappability"].mkdir(parents=True, exist_ok=True)
+        (dirs["mappability"] / "adapter_sites.tsv").write_text(
+            "chrom\tstart\tstrand\tadapter\n" + "".join(f"{c}\t{p}\t{st}\t{n}\n" for c, p, st, n in hits))
+        if hits:
+            log(f"WARNING: {len(hits)} Illumina adapter piece(s) in the assembly (reads of adapter "
+                f"would align there; reads with < {args.min_insert} bp of insert are discarded): "
+                + ", ".join(f"{c}:{p:,}" for c, p, _, _ in hits[:10]))
+
     # repeat links (which repeated sequences go together), for the arcs of the plots
     links_file = None
     if args.repeat_links_step > 0:
@@ -251,7 +271,7 @@ def main():
         log("Classifying the pairs ...")
         sc.classify(sam1, sam2, dirs["classifier"], n_cpus=n_chunks,
                     min_mapq=None if args.min_mapq < 0 else args.min_mapq,
-                    dedup_tol=args.dedup_tol)
+                    dedup_tol=args.dedup_tol, min_insert=args.min_insert)
         if not args.keep_sam:
             sam1.unlink(missing_ok=True)
             sam2.unlink(missing_ok=True)

@@ -1180,3 +1180,67 @@ attract the ambiguous reads). Density at the spot centre: 62 → 1.5.
 
 With the v3 strain mitochondrion, O/E mito–chr3 (unrescued) = 0.039, at the level of chr1 / chr2 (0.033 /
 0.024): the chr3 NUMT artefacts are gone (reference mito 1.72, v1 0.196, v2 0.071).
+
+### Omics mode: benchmarks with a known truth, ps vs standard (2026-11-18)
+
+`--data omics` (paired-end MNase-seq, ChIP-seq, ATAC-seq...; `omics_v2.py`): same classification and
+re-attribution as Hi-C (no density), fragment-coverage bigWig tracks before / after, `rescued_fraction.bw`,
+and with `--input_omics` the log2(IP / input) tracks (the input must be processed like the IP). Benchmarks:
+a region is copied over another in the genome; the reads of the overwritten region receive the copied
+sequence (they keep their name, so the truth is known); truth = the same reads on the original genome.
+Figures and scripts: `/media/axel/EVO/data_for_v2/omics_figures/`.
+
+**MNase-seq** (yeast SRR34921858, 10 M pairs, 2 × 51 bp; chrVII 50–58 kb copied over 150–158 kb; nucleosome
+signal roughly uniform):
+
+| | border fragments at the right copy | signal / truth source ; target | r 50 bp source ; target |
+|---|---|---|---|
+| random | 56.8 % | 0.61 ; 0.58 | 0.53 ; 0.71 |
+| ps | 100 % | 1.19 ; 1.19 | 0.58 ; 0.79 |
+| standard | 100 % | 0.87 ; 1.51 | 0.53 ; 0.77 |
+| ceiling (copies indistinguishable) | | | 0.70 ; 0.83 |
+
+The P(s) (fragment-length distribution) places the fragments that cross the border of a copy perfectly.
+Fragments inside identical copies cannot be resolved (49 % right copy whatever the mode): ps splits them
+evenly; random loses 40 % of the signal (mates placed in different copies are no longer fragments); standard
+biases the copies with a coverage prior that is itself reconstructed (no unique read inside the copies).
+(The 1.19 excess comes from the simulation: the injected reads have no sequencing error.)
+
+**Cohesin ChIP-seq** (Scc1-HA, nocodazole, W303 T2T; IP CH376 6.2 M pairs, input CH381 4.0 M, 2 × 35 bp;
+10 peak windows of 3 kb, log2(IP / input) 2.7–3.3, copied over 10 unenriched windows on other chromosomes;
+medians over the 10 pairs):
+
+| | IP signal / truth: peak ; no-signal copy | log2(IP/input) simulated − truth: peak ; no-signal copy |
+|---|---|---|
+| unrescued | 0.02 ; 0.04 | −1.65 ; −0.56 |
+| random | 0.34 ; 1.86 | −0.60 ; +2.05 |
+| ps | 0.69 ; 3.71 | −0.63 ; +2.02 |
+| standard | 1.18 ; 0.56 | +0.07 ; −0.93 |
+
+ps / random split the peak and create a false peak (+2) on the copy without signal (10 / 10 pairs);
+standard puts the peak back on the right copy (its coverage context attracts the IP reads) but exaggerates
+the contrast: the input (flat coverage) is split evenly while the IP background goes to the rich copy, so
+the no-signal copy ends with a false depletion (6 / 10 pairs, down to −4.3) and 3 / 10 pairs keep a false
+peak.
+
+**Recommendation:** ps (default) for roughly uniform signals (MNase-seq, ATAC-seq at large scale, MFA / copy
+number); standard for peaked signals (ChIP-seq of factors, cohesin, histone marks with peaks). In both cases
+the signal of strictly identical copies is an estimate: check `rescued_fraction.bw`.
+
+### Illumina adapter reads and adapter pieces in the assembly (2026-11-18)
+
+After the coordinate dedup, a thin line remained at chr3 ~35.4 Mb in the mosquito maps. 1,246 unique pairs had
+one read starting exactly at chr3:35,436,681 (+), with 626 different partners all over the genome. The reads
+are `GATCGGAAGAGCACACGTCTGAACTCCAGTCACCG`: the DpnII site followed by the Illumina TruSeq adapter (fragments
+with no insert), and the assembly contains 24–29 bp of this adapter inside a satellite at chr3:35,436,680
+(contamination of the assembly). The adapter reads align there uniquely (MAPQ >= 30) and their mates create
+false contacts with the whole genome; one PCR-amplified molecule of this kind was the 104-copy jackpot above.
+
+- `streaming_classifier_v2.insert_length` / `--min_insert 20`: a read whose adapter (core GATCGGAAGAGC,
+  preceded or not by its A) starts before base 20 is treated as unmapped (group0); longer inserts are kept
+  (local alignment clips the adapter). Mosquito: 66,896 pairs removed; pairs at chr3:35,436,681 1,246 → 43;
+  contacts of its 100 kb bin 5,422 → 1,790; the line is gone, the centromere clustering is kept.
+- `mappability_v2.adapter_sites`: the 19 bp TruSeq read 1 / read 2 adapter starts (both strands) are searched
+  in the assembly at the mappability stage → `mappability/adapter_sites.tsv` and a warning. Mosquito
+  (VPISU_Cqui_1.0 + wPipMtq): 9 pieces (chr1 114.2; chr2 65.7, 93.0, 204.3, 213.8; chr3 35.4, 89.9, 123.9,
+  132.7 Mb); yeast T2T: none.

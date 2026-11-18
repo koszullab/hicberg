@@ -10,9 +10,10 @@ The pipeline is the Hi-C one (classification, P(s) and coverage laws,
 re-attribution, mode ps by default); for such data the intra "P(s)" of the
 proper pairs is the fragment-length distribution, so a read with several copies
 is placed at the copy at fragment distance from its mate (mate rescue). The
-fragments inside identical copies cannot be resolved: ps splits them evenly;
-mode standard weights them by the coverage of their neighbourhood (one EM step),
-which biased the copies in the MNase benchmark (DEVELOPMENT.md).
+fragments inside identical copies cannot be resolved: ps splits them evenly
+(best for uniform signals: MNase-seq benchmark); mode standard weights them by the
+coverage of their neighbourhood (one EM step): best for peaked ChIP-seq (cohesin
+benchmark: peaks back on the right copy, contrast exaggerated). DEVELOPMENT.md.
 
 Instead of the Hi-C matrices, this stage writes, from unrescued.pairs and
 rescued.pairs (5' positions and strands of both reads):

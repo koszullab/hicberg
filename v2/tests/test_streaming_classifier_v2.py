@@ -168,3 +168,26 @@ def test_dedup_coordinates_tolerance(tmp_path):
     assert (n_in, n_dup) == (8, 4)
     kept = [l for l in p.read_text().splitlines() if not l.startswith("#")]
     assert len(kept) == 4 and p.read_text().startswith("## pairs format")
+
+
+def test_insert_length_adapter():
+    assert sc.insert_length("ACGT" * 9) == 36                                   # no adapter
+    assert sc.insert_length("GATCGGAAGAGCACACGTCTGAACTCCAGTCACCG") == 0          # adapter dimer
+    assert sc.insert_length("TTTTTTTTTTAGATCGGAAGAGCACACGT") == 10              # 10 bp insert + AGATCGG...
+    assert sc.insert_length("C" * 69 + "AGATCGGAAGAGCACACGTCTGAACTCCAGTC") == 69
+
+
+def test_adapter_reads_go_to_group0(tmp_path):
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n"
+    def line(name, seq, pos):
+        return "\t".join([name, "0", "chr1", str(pos), "42", f"{len(seq)}M", "*", "0", "0",
+                          seq, "I" * len(seq), "AS:i:60"]) + "\n"
+    adapter = "GATCGGAAGAGCACACGTCTGAACTCCAGTCACCG"
+    long_insert = "TTGCA" * 6 + "AGATCGGAAG"                                      # 30 bp insert: kept
+    r1 = [line("a", adapter, 500), line("b", long_insert, 900)]
+    r2 = [line("a", "ACGTA" * 7, 9000), line("b", "CCGTA" * 7, 9500)]
+    (tmp_path / "1.sam").write_text(head + "".join(r1))
+    (tmp_path / "2.sam").write_text(head + "".join(r2))
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
+    stats = (tmp_path / "out" / "stats.txt").read_text()
+    assert "adapter     : 1" in stats and "group1      : 1" in stats

@@ -147,3 +147,13 @@ def test_repeat_families():
     kinds = dict(zip(fams.family, fams.kind))
     assert kinds[f[("chrA", 1000)]] == "tandem" and kinds[f[("chrA", 0)]] == "subtelomeric"
     assert sorted(fams.family) == [1, 2] and fams.n_bins.tolist() == [4, 3]
+
+
+def test_adapter_sites(tmp_path):
+    fa = tmp_path / "g.fa"
+    fa.write_text(">c1\n" + "ACGT" * 20 + "aaaaGATCGGAAGAGCACACGTCtgaac" + "TTGA" * 10 + "\n>c2\n"
+                  + "GACGTGCTCTTCCGATC" + "A" * 30 + "\n")
+    hits = mp.adapter_sites(fa)
+    assert hits == [("c1", 85, "+", "TruSeq read 1 adapter")]
+    fa.write_text(">c\n" + "ACACGACGCTCTTCCGATC" + "GGGG" + "\n")                 # read 2 adapter, - strand
+    assert mp.adapter_sites(fa) == [("c", 1, "-", "TruSeq read 2 adapter")]
