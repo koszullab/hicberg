@@ -29,6 +29,26 @@ from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 import numpy as np                                    # noqa: E402
 
 
+def opaque_imshow(ax, z, cmap, vmin, vmax, bad="white", **kwargs):
+    """imshow of a colour-mapped matrix as an opaque RGB image.
+
+    -inf (log of zero contacts) gets the lowest colour of the scale, NaN the colour `bad`.
+    A masked / NaN array is otherwise embedded in the PDF with a transparency mask, which
+    PDF viewers render as grey speckles when the page is not zoomed. Returns a
+    ScalarMappable for the colorbar."""
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize, to_rgb
+    cmap = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    norm = Normalize(vmin=vmin, vmax=vmax)
+    z = np.asarray(np.ma.filled(z, np.nan) if np.ma.isMaskedArray(z) else z, dtype=float)
+    nan = np.isnan(z)
+    rgb = cmap(norm(np.where(np.isneginf(z) | nan, vmin, z)))[..., :3]
+    rgb[nan] = to_rgb(bad)
+    kwargs.setdefault("interpolation", "none")
+    ax.imshow(rgb, **kwargs)
+    return ScalarMappable(norm=norm, cmap=cmap)
+
+
 XS, UNCUTS, CIRCLES, WEIRDS = "xs.npy", "uncuts.npy", "circles.npy", "weirds.npy"
 TRANS_PS, COVERAGE_RAW, COVERAGE = "trans_ps.npy", "coverage1.npy", "coverage.npy"
 DENSITY, CONTACTS, CHROM_SIZES = "density_map.npy", "contacts.npz", "chromosome_sizes.npy"
@@ -302,7 +322,7 @@ def plot_trans_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "refere
 
         fig, axes = plt.subplots(1, len(panels), figsize=(8 * len(panels), 7.5), squeeze=False)
         for ax, (label, _), lm in zip(axes[0], panels, logs):
-            im = ax.imshow(lm, cmap="Wistia", interpolation="none", vmin=vmin, vmax=vmax)
+            im = opaque_imshow(ax, lm, "Wistia", vmin, vmax)
             ax.set_xticks(range(len(chroms)), chroms, rotation=90, fontsize=7)
             ax.set_yticks(range(len(chroms)), chroms, fontsize=7)
             ax.set_title(f"log10 trans P(s) — {label}")
@@ -394,7 +414,7 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0, c
 
     def show(ax, mat, title, ticks=None):
         with np.errstate(divide="ignore", invalid="ignore"):
-            im = ax.imshow(np.log2(mat), cmap=cmap, vmin=-vlim, vmax=vlim, interpolation="none")
+            im = opaque_imshow(ax, np.log2(mat), cmap, -vlim, vlim, bad="lightgrey")
         ax.set_title(title, fontsize=9)
         if ticks:
             pos, lab = ticks
@@ -500,8 +520,8 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
             with np.errstate(divide="ignore", invalid="ignore"):
                 z = np.log2(mat)
             z[mat == 0] = -lim           # zero contact: darkest blue (grey = excluded bins only)
-            im = ax.imshow(z, cmap=cmap, vmin=-lim, vmax=lim, interpolation="none",
-                           extent=extent, aspect="equal")
+            im = opaque_imshow(ax, z, cmap, -lim, lim, bad="lightgrey",
+                               extent=extent, aspect="equal")
             ax.set_title(lab, fontsize=9)
             ax.set(xlabel=f"{b} (kb)", ylabel=f"{a} (kb)")
             fig.colorbar(im, ax=ax, fraction=0.046 * min(1.0, sizes[a] / sizes[b]), pad=0.03,
@@ -592,8 +612,7 @@ def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genom
         for i, ((lab, _), z) in enumerate(zip(mats, logs)):
             x0 = left + i * (side + gap)
             ax = fig.add_axes(frac(x0, map_y, side, side))
-            im = ax.imshow(z, cmap=cmap, vmin=0, vmax=vmax, interpolation="none",
-                           extent=extent, aspect="auto")
+            im = opaque_imshow(ax, z, cmap, 0, vmax, extent=extent, aspect="auto")
             ax.set_title(lab, fontsize=10)
             ax.tick_params(labelbottom=False, labelsize=7)
             tr = fig.add_axes(frac(x0, bottom, side, track_h), sharex=ax)

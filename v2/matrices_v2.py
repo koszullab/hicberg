@@ -313,6 +313,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
     their map.
     """
     import cooler
+    from plots_v2 import opaque_imshow
     unres, res = cooler.Cooler(str(unrescued_cool)), cooler.Cooler(str(rescued_cool))
     names = unres.chromnames
     if chrom_pairs is None:
@@ -492,8 +493,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         for col, (lab, z) in enumerate(((labels[0], z_u), (labels[1], z_r))):
             x0 = left + col * (side + gap)
             ax = fig.add_axes(frac(x0, map_y, side, h_map))
-            im = ax.imshow(np.ma.masked_invalid(z), cmap=cmap, vmin=vmin, vmax=vmax,
-                           interpolation="none", extent=extent, aspect="auto")
+            im = opaque_imshow(ax, z, cmap, vmin, vmax, bad="white", extent=extent, aspect="auto")
             pad = 6 + (72 * (arc_h + 0.1) if arcs is not None and a != b else 0)
             ax.set_title(f"{lab} — {a} × {b} — {kind}, {kb:g} kb bins\n"
                          f"{n_contacts[col]:,} contacts", fontsize=9, pad=pad)
