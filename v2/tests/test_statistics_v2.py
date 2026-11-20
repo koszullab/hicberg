@@ -238,3 +238,10 @@ def test_fill_from_all_reads(tmp_path):
     out = st.fill_from_all_reads(acc, final, kept, mapp, z)["chrA"]
     # scale = median(100 / 200) = 0.5 → bin 2: 0.5 × 300, bin 3: 0 (no read at all)
     np.testing.assert_allclose(out, [100, 100, 150, 0, 100, 100])
+
+
+def test_generate_xs_linear_then_log():
+    xs = st.generate_xs(100_000, 1.1, linear_until=1000, linear_step=2)
+    assert xs[0] == 0 and xs[1] == 2 and np.all(np.diff(xs[xs <= 1000]) == 2)
+    assert xs[-1] == st.generate_xs(100_000, 1.1)[-1]           # same log bins beyond
+    assert np.all(np.diff(xs) > 0)

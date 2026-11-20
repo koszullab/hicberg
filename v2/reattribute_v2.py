@@ -61,21 +61,29 @@ def bowtie2_command(index, fastq, max_alignments="100", threads=1):
             "-x", str(index), "-U", str(fastq)]
 
 
-def read_blocks(lines):
+_COMP = bytes.maketrans(b"ACGTNacgtn", b"TGCANtgcan")
+
+
+def read_blocks(lines, with_seq=False):
     """
     Group the alignment lines of a SAM stream by read (consecutive with
     --reorder). Yields (read name, [(chrom, 5' position, is_reverse, AS), ...]),
     unmapped alignments left out (empty list if the read is unmapped).
+    with_seq: yields (name, block, read sequence in its sequencing orientation, bytes).
     """
-    name, block = None, []
+    name, block, seq = None, [], b""
     for line in lines:
         f = split_sam(line)
         if f is None:
             continue
         if f[0] != name:
             if name is not None:
-                yield name, block
+                yield (name, block, seq) if with_seq else (name, block)
             name, block = f[0], []
+            if with_seq:
+                seq = f[9].encode()
+                if int(f[1]) & 16:
+                    seq = seq.translate(_COMP)[::-1]
         flag = int(f[1])
         if flag & 4:
             continue
@@ -84,7 +92,7 @@ def read_blocks(lines):
         rev = bool(flag & 16)
         block.append((f[2], fast_outer_5prime(f, rev), rev, score))
     if name is not None:
-        yield name, block
+        yield (name, block, seq) if with_seq else (name, block)
 
 
 def best_candidates(block, as_delta=0):
@@ -137,15 +145,18 @@ class Laws:
             circular = read_circular(d)
         self.circular = np.array([c in circular for c in self.names])
 
-        # P(s): law[code, type, xs index], types 0 uncut, 1 circle, 2 weird
+        # P(s): law[code, type, xs index], types 0 uncut, 1 circle, 2 weird, 3 orientation
+        # unknown (repeat-index candidates, strand set after the draw): mean of the 4 orientations
         xs = load(st.XS)
         self.xs_glob = max(xs.values(), key=len)
         self.n_xs = np.array([len(xs[c]) for c in self.names])
-        self.law = np.zeros((len(self.names), 3, len(self.xs_glob)))
+        self.law = np.zeros((len(self.names), 4, len(self.xs_glob)))
         for t, name in enumerate((st.UNCUTS, st.CIRCLES, st.WEIRDS)):
             law = load(name)
             for c in self.names:
                 self.law[self.code[c], t, :len(law[c])] = law[c]
+        self.law[:, 3] = (self.law[:, 0] + self.law[:, 1] + 2 * self.law[:, 2]) / 4
+        self.index_bin = 0                                  # set by set_index_bin()
         trans = load(st.TRANS_PS)
         self.trans = np.array([[trans.get((a, b), 0.0) for b in self.names] for a in self.names])
 
@@ -160,18 +171,49 @@ class Laws:
             # the density may be binned more coarsely than the coverage (large genomes)
             self.dens_bin = int(np.load(d / st.DENSITY_BIN)) if (d / st.DENSITY_BIN).is_file() \
                 else bin_size
+            # refined density of the small, densely covered molecules (statistics_v2)
+            self.fine = np.zeros(len(self.names), dtype=bool)
+            if (d / st.DENSITY_FINE_MAP).is_file():
+                self.density_fine = load(st.DENSITY_FINE_MAP)
+                self.dens_bin_fine = int(np.load(d / st.DENSITY_FINE_BIN))
+                fine_names = {a for a, _ in self.density_fine}
+                self.fine = np.array([c in fine_names for c in self.names])
+                self.dens_n_fine = np.array([self.density_fine[(c, c)].shape[0] if c in fine_names else 1
+                                             for c in self.names])
+
+    def set_index_bin(self, B):
+        """Repeat-index candidates sit at bin centres: two of them in the same bin are at an
+        unknown distance in [0, B) (triangular law of |x - y| for x, y uniform in the bin), so
+        their P(s) is the orientation-averaged law averaged over that distance law."""
+        self.index_bin = B
+        x = self.xs_glob.astype(np.float64)
+        width = np.diff(np.append(x, x[-1] * 1.1))
+        w = width * np.clip(B - x, 0, None)
+        self.law_same_bin = np.array([(self.law[c, 3, :self.n_xs[c]] * w[:self.n_xs[c]]).sum()
+                                      / max(w[:self.n_xs[c]].sum(), 1e-300)
+                                      for c in range(len(self.names))])
 
     def ps(self, c1, p1, r1, c2, p2, r2):
-        """P(s) of each combination (intra: by orientation and distance; trans: trans P(s))."""
+        """P(s) of each combination (intra: by orientation and distance; trans: trans P(s)).
+        Strands: False / 0 forward, True / 1 reverse, 2 unknown (orientation-averaged law)."""
         out = self.trans[c1, c2].astype(np.float64)
         cis = c1 == c2
         if cis.any():
             c, a, b = c1[cis], p1[cis], p2[cis]
-            orient = st.pair_orientation(a, b, r1[cis], r2[cis])
+            s1, s2 = np.asarray(r1)[cis], np.asarray(r2)[cis]
+            orient = st.pair_orientation(a, b, s1 == 1, s2 == 1)
             kind = np.minimum(orient, 2)                       # ++ and -- → weird
+            unknown = (s1 == 2) | (s2 == 2)
+            kind[unknown] = 3
             d = st.cis_distance(a, b, self.sizes[c], self.circular[c])
             idx = np.minimum(st.attribute_xs(self.xs_glob, d), self.n_xs[c] - 1)
             out[cis] = self.law[c, kind, idx]
+            if self.index_bin:
+                same = (s1 == 2) & (s2 == 2) & (d < self.index_bin)
+                if same.any():
+                    sub = out[cis]
+                    sub[same] = self.law_same_bin[c[same]]
+                    out[cis] = sub
         return out
 
     def coverage(self, c, p):
@@ -179,9 +221,22 @@ class Laws:
         return self.cov[self.cov_off[c] + np.maximum(b, 0)]
 
     def density_of(self, c1, p1, c2, p2):
-        """Density of each combination; blocks are stored for chromosome a <= b."""
-        b1 = np.clip((p1 - 1) // self.dens_bin, 0, self.dens_n[c1] - 1)
-        b2 = np.clip((p2 - 1) // self.dens_bin, 0, self.dens_n[c2] - 1)
+        """Density of each combination; blocks are stored for chromosome a <= b. Pairs of
+        molecules that have a refined density map (both in it) use it."""
+        both = self.fine[c1] & self.fine[c2]
+        if both.any():
+            out = np.empty(len(c1))
+            out[both] = self._density(c1[both], p1[both], c2[both], p2[both], self.density_fine,
+                                      self.dens_bin_fine, self.dens_n_fine)
+            if (~both).any():
+                out[~both] = self._density(c1[~both], p1[~both], c2[~both], p2[~both], self.density,
+                                           self.dens_bin, self.dens_n)
+            return out
+        return self._density(c1, p1, c2, p2, self.density, self.dens_bin, self.dens_n)
+
+    def _density(self, c1, p1, c2, p2, density, dens_bin, dens_n):
+        b1 = np.clip((p1 - 1) // dens_bin, 0, dens_n[c1] - 1)
+        b2 = np.clip((p2 - 1) // dens_bin, 0, dens_n[c2] - 1)
         swap = c1 > c2
         ca, cb = np.where(swap, c2, c1), np.where(swap, c1, c2)
         ba, bb = np.where(swap, b2, b1), np.where(swap, b1, b2)
@@ -189,7 +244,7 @@ class Laws:
         key = ca * len(self.names) + cb
         for k in np.unique(key):
             sel = key == k
-            blk = self.density[(self.names[k // len(self.names)], self.names[k % len(self.names)])]
+            blk = density[(self.names[k // len(self.names)], self.names[k % len(self.names)])]
             out[sel] = blk[ba[sel], bb[sel]]
         return out
 
@@ -388,9 +443,140 @@ def hierarchical_draw(laws, cand1, cand2, rng, near=100_000, n_samples=256):
 # One chunk
 # ---------------------------------------------------------------------------
 
+def index_candidates(repeat_index, seq):
+    """
+    Candidates of a read whose bowtie2 list is saturated, from the repeat index: every bin
+    sharing the read's repeated minimizers, strand unknown (2: orientation-averaged P(s); exact
+    position and strand set after the draw by RepeatIndex.place). Returns [(chrom, bin centre,
+    2, weight, bin start)] (weight = copies of the read sequence in the bin), or [].
+    """
+    chroms, starts, w = repeat_index.candidates(seq)
+    half = repeat_index.bin_size // 2
+    return [(c, b + half, 2, x, b) for c, b, x in zip(chroms, starts.tolist(), w.tolist())]
+
+
+def _draw_pairs(pairs, laws, out_fh, rng, stats, repeat_index=None, batch_combinations=2_000_000,
+                max_combinations=0, near=100_000, n_samples=256, index_limit=200_000,
+                near_index=20_000):
+    """
+    Draw one combination per pair and write it (shared by the bowtie2 and the index-only
+    re-attributions). pairs yields (name, cands1, bins1, cands2, bins2, seq1, seq2, quals1,
+    quals2): cands = [(chrom, pos, strand, weight, bin start)], strand 0 / 1 / 2 (unknown: a bin
+    of the repeat index, bin start >= 0, resolved to an exact position after the draw); bins =
+    True if the candidates are index bins. Pairs with more than max_combinations (> 0), or an
+    index-bin side and more than index_limit, combinations use the hierarchical draw (exact
+    combinations below near, or near_index for index bins).
+    """
+
+    def as_arrays(c):
+        return (np.array([laws.code[a[0]] for a in c], dtype=np.int64),
+                np.array([a[1] for a in c], dtype=np.int64),
+                np.array([a[2] for a in c], dtype=np.int8),
+                np.array([a[3] for a in c], dtype=np.float64))
+
+    def choices(cand, seq, quals):
+        """Exact placements [(pos, rev)] of a chosen candidate (several ties for an index bin)."""
+        chrom, pos, rev, _, b = cand
+        if b < 0:
+            return [(pos, bool(rev))]
+        ch = repeat_index.place_choices(seq, chrom, b, quals)
+        if not ch:
+            stats["index_unplaced"] += 1
+            return [(pos, False)]
+        return ch
+
+    def pick(c_fixed, fixed, chrom, ch):
+        """One placement among ch ∝ P(s) relative to the fixed mate (uniform if trans or 0)."""
+        if len(ch) == 1:
+            return ch[0]
+        if c_fixed == chrom:
+            n = len(ch)
+            code = np.full(n, laws.code[chrom])
+            w = laws.ps(code, np.full(n, fixed[0]), np.full(n, int(fixed[1])),
+                        code, np.array([x[0] for x in ch]), np.array([int(x[1]) for x in ch]))
+            w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+            if w.sum() > 0:
+                return ch[int(np.searchsorted(np.cumsum(w), rng.random() * w.sum(), side="right").clip(0, n - 1))]
+        return ch[int(rng.integers(len(ch)))]
+
+    def write(name, a, b, n1, n2, seq1, seq2, qual1, qual2):
+        """Exact placement of the pair: a mate with tied placements (tandem copies in the drawn
+        bin) is placed ∝ P(s) relative to the other one, so that short-range contacts keep their
+        distance and orientation."""
+        ch_a, ch_b = choices(a, seq1, qual1), choices(b, seq2, qual2)
+        if len(ch_a) > 1 and len(ch_b) > 1:
+            pa, ra = ch_a[int(rng.integers(len(ch_a)))]
+            pb, rb = pick(a[0], (pa, ra), b[0], ch_b)
+        elif len(ch_a) > 1:
+            pb, rb = ch_b[0]
+            pa, ra = pick(b[0], (pb, rb), a[0], ch_a)
+        else:
+            pa, ra = ch_a[0]
+            pb, rb = pick(a[0], (pa, ra), b[0], ch_b)
+        out_fh.write(f"{name}\t{a[0]}\t{pa}\t{b[0]}\t{pb}\t{'-' if ra else '+'}\t{'-' if rb else '+'}\t"
+                     f"{n1}\t{n2}\n")
+        stats["intra"] += int(a[0] == b[0])
+
+    batch = []                     # (name, cands1, cands2, seq1, seq2, quals1, quals2)
+    n_comb = 0
+
+    def flush():
+        nonlocal batch, n_comb
+        if not batch:
+            return
+        cands = [b[1] for b in batch], [b[2] for b in batch]
+        n1 = np.array([len(c) for c in cands[0]])
+        n2 = np.array([len(c) for c in cands[1]])
+        arrays = [as_arrays([a for c in side for a in c]) for side in cands]
+        i1, i2, starts, k = combination_indices(n1, n2)
+        (c1, p1, r1, a1), (c2, p2, r2, a2) = arrays
+        # statistical propensity × likelihood (or copies) of each of the two candidates
+        w = laws.propensity(c1[i1], p1[i1], r1[i1], c2[i2], p2[i2], r2[i2]) * a1[i1] * a2[i2]
+        chosen = weighted_draw(w, starts, k, rng)
+        s1, s2 = i1[chosen], i2[chosen]
+        o1 = np.concatenate([[0], np.cumsum(n1)[:-1]])
+        o2 = np.concatenate([[0], np.cumsum(n2)[:-1]])
+        for p, (name, x1, x2, q1, q2, u1, u2) in enumerate(batch):
+            write(name, x1[s1[p] - o1[p]], x2[s2[p] - o2[p]], n1[p], n2[p], q1, q2, u1, u2)
+        stats["placed"] += len(batch)
+        stats["combinations"] += int(k.sum())
+        stats["evaluated"] += int(k.sum())
+        stats["cand1"] += int(n1.sum())
+        stats["cand2"] += int(n2.sum())
+        batch, n_comb = [], 0
+
+    for name, c1, x1, c2, x2, q1, q2, u1, u2 in pairs:
+        n = len(c1) * len(c2)
+        if (max_combinations and n > max_combinations) or ((x1 or x2) and n > index_limit):
+            y1, y2 = as_arrays(c1), as_arrays(c2)
+            i, j, n_eval = hierarchical_draw(laws, y1, y2, rng, near_index if (x1 or x2) else near,
+                                             n_samples)
+            write(name, c1[i], c2[j], len(c1), len(c2), q1, q2, u1, u2)
+            stats["placed"] += 1
+            stats["sampled"] += 1
+            stats["combinations"] += n
+            stats["evaluated"] += n_eval
+            stats["cand1"] += len(c1)
+            stats["cand2"] += len(c2)
+            continue
+        batch.append((name, c1, c2, q1, q2, u1, u2))
+        n_comb += n
+        if n_comb >= batch_combinations:
+            flush()
+    flush()
+    return stats
+
+
+def _new_stats():
+    return dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0,
+                sampled=0, evaluated=0, index_reads=0, index_bins=0, index_unplaced=0,
+                index_scored=0, index_fallback=0)
+
+
 def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rate=0.01,
                        batch_combinations=2_000_000, max_combinations=0, near=100_000,
-                       n_samples=256):
+                       n_samples=256, repeat_index=None, saturation=None, index_limit=200_000,
+                       near_index=20_000):
     """
     Re-attribute the pairs of two SAM streams (R1, R2) and write the chosen
     combination of each pair to out_fh. Candidates: alignments within as_delta
@@ -398,84 +584,168 @@ def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rat
     error_rate; 0 → best-score ties only). Pairs with more than max_combinations
     R1 × R2 combinations (> 0) are drawn by hierarchical_draw (near combinations
     exact, far ones importance-sampled); 0 → all combinations always evaluated.
+
+    repeat_index (RepeatIndex) and saturation (bowtie2 -k): a read with `saturation`
+    alignments (the list was cut by -k, so it is an arbitrary subset of the copies) and at
+    least 2 candidates takes its candidates from the repeat index instead (all the bins
+    carrying its sequence); the drawn bin is then resolved to an exact position and strand.
+    Pairs with an index side and more than index_limit combinations use the hierarchical draw
+    with exact combinations below near_index (bins of 2 kb: fewer exact combinations).
     Returns counters.
     """
     lam = score_lambda(error_rate)
     if np.isinf(lam):
         as_delta = 0
-    stats = dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0,
-                 sampled=0, evaluated=0)
+    stats = _new_stats()
+    use_index = repeat_index is not None and saturation
+    if use_index:
+        laws.set_index_bin(repeat_index.bin_size)
 
-    def as_arrays(c):
-        return (np.array([laws.code[a[0]] for a in c], dtype=np.int64),
-                np.array([a[1] for a in c], dtype=np.int64),
-                np.array([a[2] for a in c], dtype=bool),
-                alignment_weights([a[3] for a in c], lam))
-    batch = []                     # (name, cands1, cands2)
-    n_comb = 0
+    def weighted(block):
+        """[(chrom, pos, rev, weight, bin start = -1)] of the best candidates of a read."""
+        c = [a for a in best_candidates(block, as_delta) if a[0] in laws.code]
+        if not c:
+            return c
+        w = alignment_weights([a[3] for a in c], lam)
+        return [(a[0], a[1], int(a[2]), x, -1) for a, x in zip(c, w)]
 
-    def flush():
-        nonlocal batch, n_comb
-        if not batch:
-            return
-        names = [b[0] for b in batch]
-        cands = [b[1] for b in batch], [b[2] for b in batch]
-        n1 = np.array([len(c) for c in cands[0]])
-        n2 = np.array([len(c) for c in cands[1]])
-        arrays = []
-        for side in cands:
-            flat = [a for c in side for a in c]
-            arrays.append((np.array([laws.code.get(a[0], -1) for a in flat], dtype=np.int64),
-                           np.array([a[1] for a in flat], dtype=np.int64),
-                           np.array([a[2] for a in flat], dtype=bool),
-                           np.concatenate([alignment_weights([a[3] for a in c], lam) for c in side])))
-        i1, i2, starts, k = combination_indices(n1, n2)
-        (c1, p1, r1, a1), (c2, p2, r2, a2) = arrays
-        # statistical propensity × likelihood of each of the two alignments
-        w = laws.propensity(c1[i1], p1[i1], r1[i1], c2[i2], p2[i2], r2[i2]) * a1[i1] * a2[i2]
-        chosen = weighted_draw(w, starts, k, rng)
-        s1, s2 = i1[chosen], i2[chosen]
-        for p, (name, a, b) in enumerate(zip(names, s1, s2)):
-            out_fh.write(f"{name}\t{laws.names[c1[a]]}\t{p1[a]}\t{laws.names[c2[b]]}\t{p2[b]}\t"
-                         f"{'-' if r1[a] else '+'}\t{'-' if r2[b] else '+'}\t{n1[p]}\t{n2[p]}\n")
-        stats["placed"] += len(batch)
-        stats["intra"] += int(np.sum(c1[s1] == c2[s2]))
-        stats["combinations"] += int(k.sum())
-        stats["evaluated"] += int(k.sum())
-        stats["cand1"] += int(n1.sum())
-        stats["cand2"] += int(n2.sum())
-        batch, n_comb = [], 0
+    def candidates(block, seq):
+        c = weighted(block)
+        if use_index and len(block) >= saturation and len(c) >= 2:
+            x = [a for a in index_candidates(repeat_index, seq) if a[0] in laws.code]
+            if x:
+                stats["index_reads"] += 1
+                stats["index_bins"] += len(x)
+                return x, True
+        return c, False
 
-    for (name1, b1), (name2, b2) in zip(read_blocks(lines1), read_blocks(lines2)):
-        if name1 != name2:
-            raise ValueError(f"R1 / R2 out of sync: {name1} vs {name2}")
-        stats["pairs"] += 1
-        c1, c2 = best_candidates(b1, as_delta), best_candidates(b2, as_delta)
-        c1 = [a for a in c1 if a[0] in laws.code]
-        c2 = [a for a in c2 if a[0] in laws.code]
-        if not c1 or not c2:
-            stats["unplaced"] += 1
+    def pairs():
+        for (name1, b1, q1), (name2, b2, q2) in zip(read_blocks(lines1, True), read_blocks(lines2, True)):
+            if name1 != name2:
+                raise ValueError(f"R1 / R2 out of sync: {name1} vs {name2}")
+            stats["pairs"] += 1
+            (c1, x1), (c2, x2) = candidates(b1, q1), candidates(b2, q2)
+            if not c1 or not c2:
+                stats["unplaced"] += 1
+                continue
+            yield name1, c1, x1, c2, x2, q1, q2, None, None
+
+    return _draw_pairs(pairs(), laws, out_fh, rng, stats, repeat_index, batch_combinations,
+                       max_combinations, near, n_samples, index_limit, near_index)
+
+
+def read_fastq(path):
+    """Yield (name, sequence bytes, qualities bytes) of a FASTQ file."""
+    with open(path, "rb") as fh:
+        while True:
+            h = fh.readline()
+            if not h:
+                return
+            seq = fh.readline().rstrip()
+            fh.readline()
+            qual = fh.readline().rstrip()
+            yield h[1:].split()[0].decode(), seq, qual
+
+
+def read_hits(path):
+    """Yield (name, hit R1, hit R2) of a group2_hits_chunk file: hit = (chrom, 5' position,
+    is_reverse, AS, unique)."""
+    with open(path) as fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            yield f[0], (f[1], int(f[2]), f[3] == "-", int(f[4]), f[5] == "1"), \
+                (f[6], int(f[7]), f[8] == "-", int(f[9]), f[10] == "1")
+
+
+def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, max_scored=50,
+                          min_fraction=0.3, stats=None):
+    """
+    Candidates of one group2 read for the index-only re-attribution (see
+    reattribute_index_stream). hit = first alignment (chrom, 5' position, is_reverse, AS,
+    unique); codes = chromosomes known to the laws. Returns (candidates, are_bins).
+    """
+    stats = stats if stats is not None else _new_stats()
+    chrom, pos, rev, _, unique = hit
+    if unique:
+        return [(chrom, pos, int(rev), 1.0, -1)], False
+    chroms, starts, w = repeat_index.candidates(seq, min_fraction)
+    if len(chroms) == 0:
+        stats["index_fallback"] += 1
+        return [(chrom, pos, int(rev), 1.0, -1)], False
+    stats["index_reads"] += 1
+    B = repeat_index.bin_size
+    if len(chroms) + 1 > max_scored:
+        stats["index_bins"] += len(chroms)
+        return [(c, b + B // 2, 2, x, b) for c, b, x in zip(chroms, starts.tolist(), w.tolist())
+                if c in codes], True
+    stats["index_scored"] += 1
+    bins = set(zip(chroms, starts.tolist())) | {(chrom, (pos - 1) // B * B)}
+    found = {}
+    for c, b in bins:
+        if c not in codes:
             continue
-        if max_combinations and len(c1) * len(c2) > max_combinations:
-            x1, x2 = as_arrays(c1), as_arrays(c2)
-            i, j, n_eval = hierarchical_draw(laws, x1, x2, rng, near, n_samples)
-            out_fh.write(f"{name1}\t{laws.names[x1[0][i]]}\t{x1[1][i]}\t{laws.names[x2[0][j]]}\t"
-                         f"{x2[1][j]}\t{'-' if x1[2][i] else '+'}\t{'-' if x2[2][j] else '+'}\t"
-                         f"{len(c1)}\t{len(c2)}\n")
-            stats["placed"] += 1
-            stats["sampled"] += 1
-            stats["intra"] += int(x1[0][i] == x2[0][j])
-            stats["combinations"] += len(c1) * len(c2)
-            stats["evaluated"] += n_eval
-            stats["cand1"] += len(c1)
-            stats["cand2"] += len(c2)
+        sc, ch = repeat_index.score_bin(seq, c, b, qual)
+        if sc is None:
             continue
-        batch.append((name1, c1, c2))
-        n_comb += len(c1) * len(c2)
-        if n_comb >= batch_combinations:
-            flush()
-    flush()
-    return stats
+        for p, r in ch:
+            if found.get((c, p, r), -1) < sc:
+                found[(c, p, r)] = sc
+    if not found:
+        stats["index_fallback"] += 1
+        return [(chrom, pos, int(rev), 1.0, -1)], False
+    best = max(found.values())
+    keep = [(k, v) for k, v in found.items() if v >= best - as_delta]
+    wts = alignment_weights([v for _, v in keep], lam)
+    return [(c, p, int(r), x, -1) for ((c, p, r), _), x in zip(keep, wts)], False
+
+
+def reattribute_index_stream(fastq1, fastq2, hits, laws, out_fh, rng, repeat_index, as_delta=30,
+                             error_rate=0.01, max_scored=50, min_fraction=0.3,
+                             batch_combinations=2_000_000, max_combinations=0, near=100_000,
+                             n_samples=256, index_limit=200_000, near_index=20_000):
+    """
+    Index-only re-attribution (no second bowtie2 alignment): the candidates of each group2
+    read come from the first alignment and the repeat index (repeat_index_v2.RepeatIndex):
+      - unique read (first alignment): its position;
+      - ambiguous read: the bins of the index sharing >= min_fraction of the best bin's read
+        minimizers, plus the bin of its first alignment;
+          <= max_scored bins (low-copy repeats): the read is aligned in each bin (score_bin:
+          ungapped local alignment, bowtie2 local scores and qualities) → exact candidates
+          within as_delta of the best score, weighted by their likelihood as the bowtie2
+          candidates (alignment_weights);
+          more bins (satellites, young repeats): the bins themselves, weighted by the copies of
+          the read sequence they carry, strand unknown, resolved to an exact position after
+          the draw;
+      - ambiguous read without any repeated minimizer: its first alignment (counted).
+    hits: group2_hits_chunk file (streaming_classifier_v2), same order as the FASTQ files.
+    """
+    lam = score_lambda(error_rate)
+    if np.isinf(lam):
+        as_delta = 0
+    stats = _new_stats()
+    laws.set_index_bin(repeat_index.bin_size)
+
+    def candidates(seq, qual, hit):
+        return index_read_candidates(repeat_index, laws.code, seq, qual, hit, as_delta, lam,
+                                     max_scored, min_fraction, stats)
+
+    def pairs():
+        for (n1, s1, u1), (n2, s2, u2), (nh, h1, h2) in zip(read_fastq(fastq1), read_fastq(fastq2),
+                                                            read_hits(hits)):
+            if not (n1 == n2 == nh):
+                raise ValueError(f"R1 / R2 / hits out of sync: {n1} {n2} {nh}")
+            stats["pairs"] += 1
+            if h1[0] not in laws.code or h2[0] not in laws.code:
+                stats["unplaced"] += 1
+                continue
+            (c1, x1), (c2, x2) = candidates(s1, u1, h1), candidates(s2, u2, h2)
+            if not c1 or not c2:
+                stats["unplaced"] += 1
+                continue
+            yield n1, c1, x1, c2, x2, s1, s2, u1, u2
+
+    return _draw_pairs(pairs(), laws, out_fh, rng, stats, repeat_index, batch_combinations,
+                       max_combinations, near, n_samples, index_limit, near_index)
 
 
 def pairs_header(chrom_sizes, extra_columns=()):
@@ -511,6 +781,22 @@ def reattribute_chunk(job):
     t0 = time.time()
     laws = Laws(job["stats_dir"], job["mode"], job.get("circular"), job["bin_size"])
     rng = np.random.default_rng(job["seed"])
+    if job.get("index_only"):
+        from repeat_index_v2 import RepeatIndex
+        with open(job["out"], "w") as out:
+            stats = reattribute_index_stream(job["fastq1"], job["fastq2"], job["hits"], laws, out, rng,
+                                             RepeatIndex(job["repeat_index"]), job["as_delta"],
+                                             job["error_rate"],
+                                             max_combinations=job.get("max_combinations", 0),
+                                             near=job.get("near", 100_000),
+                                             n_samples=job.get("n_samples", 256))
+        stats["seconds"] = time.time() - t0
+        return stats
+    repeat_index = saturation = None
+    if job.get("repeat_index") and str(job["max_alignments"]) != "all":
+        from repeat_index_v2 import RepeatIndex
+        repeat_index = RepeatIndex(job["repeat_index"])
+        saturation = int(job["max_alignments"])
     procs, handles = [], []
     try:
         if job.get("sam1"):
@@ -529,7 +815,8 @@ def reattribute_chunk(job):
                                        job["error_rate"],
                                        max_combinations=job.get("max_combinations", 0),
                                        near=job.get("near", 100_000),
-                                       n_samples=job.get("n_samples", 256))
+                                       n_samples=job.get("n_samples", 256),
+                                       repeat_index=repeat_index, saturation=saturation)
         for p in procs:
             if p.wait() != 0:
                 raise RuntimeError(f"bowtie2 failed (see {job['out']}.*.bowtie2.log)")
@@ -543,12 +830,19 @@ def reattribute_chunk(job):
 def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 max_alignments="100", as_delta=30, n_workers=1, threads=1, circular=None,
                 bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01, max_combinations=0,
-                near=100_000, n_samples=256):
+                near=100_000, n_samples=256, repeat_index=None, index_only=False):
     """
     Re-attribute all the group2 chunks of classifier_dir (in parallel, one
     process per chunk) and write output_dir/predicted.pairs.
     sam_pairs: optional list of (sam1, sam2) already aligned, instead of running bowtie2.
+    repeat_index: prefix of a repeat index (repeat_index_v2.py) for the reads whose bowtie2
+    list is saturated (-k reached), None = bowtie2 candidates only.
+    index_only: no second bowtie2 alignment, the candidates come from the first alignment and
+    the repeat index (reattribute_index_stream; needs repeat_index and the group2_hits_chunk
+    files of the classification).
     """
+    if index_only and not repeat_index:
+        raise ValueError("index_only needs a repeat index")
     if mode not in MODES:
         raise ValueError(f"Unknown mode {mode}, choose among {MODES}")
     t0 = time.time()
@@ -557,7 +851,8 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
     base = dict(stats_dir=str(stats_dir), mode=mode, circular=circular, bin_size=bin_size,
                 index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta,
                 error_rate=error_rate, max_combinations=max_combinations, near=near,
-                n_samples=n_samples)
+                n_samples=n_samples, repeat_index=str(repeat_index) if repeat_index else None,
+                index_only=index_only)
     jobs = []
     if sam_pairs:
         for i, (s1, s2) in enumerate(sam_pairs):
@@ -568,11 +863,15 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                     key=lambda p: int(re.search(r"chunk(\d+)", p.name).group(1)))
         if not r1:
             raise FileNotFoundError(f"No group2_1_chunk*.fastq in {classifier_dir}")
-        if index is None:
+        if index is None and not index_only:
             raise ValueError("--index (bowtie2 index) is required to align the group2 chunks")
         for i, f1 in enumerate(r1):
             f2 = f1.with_name(f1.name.replace("group2_1_", "group2_2_"))
-            jobs.append(dict(base, fastq1=str(f1), fastq2=str(f2), seed=seed + i,
+            hits = f1.with_name(f1.name.replace("group2_1_", "group2_hits_").replace(".fastq", ".tsv"))
+            if index_only and not hits.is_file():
+                raise FileNotFoundError(f"{hits} missing: run the classification again (index-only "
+                                        f"re-attribution needs the first alignments of the group2 reads)")
+            jobs.append(dict(base, fastq1=str(f1), fastq2=str(f2), hits=str(hits), seed=seed + i,
                              out=output_dir / f"predicted_chunk{i}.pairs"))
 
     if n_workers > 1 and len(jobs) > 1:
@@ -597,12 +896,22 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
 
     total = {k: sum(r[k] for r in results) for k in results[0] if k != "seconds"}
     p = max(total["placed"], 1)
+    if index_only:
+        cand_line = (f"candidates            : index only (no second alignment): unique reads at their "
+                     f"first alignment; ambiguous reads from the repeat index: {total['index_scored']} "
+                     f"aligned in each of their <= 50 bins (exact scores), "
+                     f"{total['index_reads'] - total['index_scored']} as bins (many copies, "
+                     f"{total['index_unplaced']} left at the bin centre), {total['index_fallback']} "
+                     f"without repeated minimizers kept at their first alignment")
+    else:
+        cand_line = (f"alignments            : "
+                     f"{'-a (all)' if str(max_alignments) == 'all' else f'-k {max_alignments}'}, "
+                     + (f"candidates within {as_delta} of the best score, weighted by their likelihood "
+                        f"(error rate {error_rate:g}, {score_lambda(error_rate):.2f} per AS point)"
+                        if error_rate > 0 else "best-score candidates only"))
     lines = [
         f"mode                  : {mode}",
-        f"alignments            : {'-a (all)' if str(max_alignments) == 'all' else f'-k {max_alignments}'}, "
-        + (f"candidates within {as_delta} of the best score, weighted by their likelihood "
-           f"(error rate {error_rate:g}, {score_lambda(error_rate):.2f} per AS point)"
-           if error_rate > 0 else "best-score candidates only"),
+        cand_line,
         f"pairs                 : {total['pairs']}",
         f"placed                : {total['placed']}",
         f"unplaced              : {total['unplaced']} (a mate without alignment)",
@@ -613,6 +922,13 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
         + (f"{total['sampled']} pairs ({100 * total['sampled'] / p:.1f}%) with > {max_combinations} "
            f"combinations: near (< {near / 1000:g} kb) exact + {n_samples} importance samples"
            if max_combinations else "off (all combinations evaluated)"),
+        f"repeat index          : "
+        + (f"{total['index_reads']} reads ({100 * total['index_reads'] / max(2 * total['pairs'], 1):.1f}%) "
+           f"with a saturated list (-k {max_alignments}) took their candidates from the index: "
+           f"{total['index_bins'] / max(total['index_reads'], 1):.0f} bins per read, "
+           f"{total['index_unplaced']} left at the bin centre (no anchor)"
+           if repeat_index and not index_only else ("see candidates" if index_only else
+                                                     "off (bowtie2 candidates only)")),
         f"placed intra          : {total['intra']} ({100 * total['intra'] / p:.1f}%)",
         f"time                  : {time.time() - t0:.0f} s ({n_workers} workers)",
     ]
@@ -650,12 +966,19 @@ def main():
                         help="Hierarchical draw: cis combinations closer than this are exact")
     parser.add_argument("--n_samples", type=int, default=256,
                         help="Hierarchical draw: importance samples of the far combinations")
+    parser.add_argument("--repeat_index", default=None,
+                        help="Prefix of a repeat index (repeat_index_v2.py): reads whose bowtie2 list "
+                             "is saturated take all the copies of their sequence as candidates")
+    parser.add_argument("--index_only", action="store_true",
+                        help="No second bowtie2 alignment: candidates from the first alignment and "
+                             "the repeat index (needs --repeat_index)")
     args = parser.parse_args()
     circular = None if args.circular is None else {c for c in args.circular.split(",") if c}
     reattribute(args.classifier_dir, args.stats_dir, args.output_dir, args.index, args.mode,
                 args.max_alignments, args.as_delta, args.n_workers, args.threads, circular,
                 args.bin_size, args.seed, error_rate=args.error_rate,
-                max_combinations=args.max_combinations, near=args.near, n_samples=args.n_samples)
+                max_combinations=args.max_combinations, near=args.near, n_samples=args.n_samples,
+                repeat_index=args.repeat_index, index_only=args.index_only)
 
 
 if __name__ == "__main__":

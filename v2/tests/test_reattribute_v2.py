@@ -173,3 +173,15 @@ def test_reattribute_stream_hierarchical_switch(stats_dir):
                                   near=5000, n_samples=64)
     assert stats["sampled"] == 1 and stats["placed"] == 1 and stats["evaluated"] < 31 * 31
     assert len(out.getvalue().split("\t")) == 9
+
+
+def test_density_of_uses_the_refined_map(stats_dir):
+    laws = ra.Laws(stats_dir, "full")
+    # fake refined map for chrA only, at 1 kb, constant 5
+    laws.fine = np.array([c == "chrA" for c in laws.names])
+    laws.dens_bin_fine = 1000
+    laws.dens_n_fine = np.array([100 if c == "chrA" else 1 for c in laws.names])
+    laws.density_fine = {("chrA", "chrA"): np.full((100, 100), 5.0)}
+    a, b = laws.code["chrA"], laws.code["chrB"]
+    out = laws.density_of(np.array([a, a]), np.array([1000, 1000]), np.array([a, b]), np.array([5000, 5000]))
+    assert out[0] == 5.0 and out[1] != 5.0          # chrA x chrA refined; chrA x chrB global

@@ -75,6 +75,34 @@ def run_stage(name, args):
     return STAGES.index(args.start_stage) <= STAGES.index(name) <= STAGES.index(args.exit_stage)
 
 
+def available_memory_gb():
+    """MemAvailable of /proc/meminfo in GB (None if unknown)."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1024 ** 2
+    except OSError:
+        pass
+    return None
+
+
+def n_workers(args, omics=False):
+    """
+    Number of group2 chunks = parallel workers of the re-attribution. bowtie2 candidates: one
+    worker per 4 CPUs (bowtie2 -p 4 each). Index-only candidates: the workers are single-threaded
+    Python processes, so one per CPU, as many as the memory allows: ~2.5 GB private per worker
+    (laws + buffers, human: 1.2-1.6 GB measured) + ~5 GB shared by all (genome codes and repeat
+    index, memory-mapped).
+    """
+    if args.workers > 0:
+        return args.workers
+    if args.candidates != "index" or omics:
+        return max(1, args.cpus // 4)
+    mem = available_memory_gb()
+    by_mem = args.cpus if mem is None else max(1, int((mem - 5) / 2.5))
+    return max(1, min(args.cpus, by_mem))
+
+
 def main():
     p = argparse.ArgumentParser(description="HiCberg v2: rescue multi-mapping reads in Hi-C / Micro-C data.",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -98,6 +126,9 @@ def main():
                    help="omics: shortest fragment (5' to 5') of the signal tracks (default 100)")
     p.add_argument("--fragment_max", type=int, default=1000,
                    help="omics: longest fragment of the signal tracks (default 1000)")
+    p.add_argument("--ps_linear", type=int, default=None,
+                   help="P(s) in linear bins of 2 bp up to this distance, log bins beyond (default 0: "
+                        "log bins only; no measured gain on MNase tandem-repeat benchmarks)")
     p.add_argument("--input_omics", default=None,
                    help="omics: output folder of the input (control) processed by the pipeline with the "
                         "same settings → log2(IP / input) tracks before / after in out/omics")
@@ -130,8 +161,23 @@ def main():
                         "MNase-seq), standard = P(s) x coverage (best for peaked ChIP-seq: peaks back on the "
                         "right copy, contrast exaggerated), random")
     p.add_argument("--max_alignments", default="100", help="bowtie2 -k value, or 'all' (-a)")
+    p.add_argument("--candidates", choices=("bowtie2", "index"), default="bowtie2",
+                   help="Candidates of the ambiguous reads: bowtie2 = second alignment with -k "
+                        "--max_alignments (saturated lists completed by the repeat index); index = no "
+                        "second alignment, first alignment + repeat index (exact scores for low-copy "
+                        "repeats, bins for highly repeated sequences; experimental)")
+    p.add_argument("--repeat_index", default="auto",
+                   help="Repeat index (minimizers of the repeated sequences, repeat_index_v2.py): reads "
+                        "whose bowtie2 list is saturated (-k reached, several near-best alignments) take "
+                        "all the copies of their sequence as candidates instead of the arbitrary first "
+                        "K found by bowtie2. 'auto' (default): built once in index/ (human: ~35 min, "
+                        "~0.5 GB + the genome as codes on disk); a prefix of an existing index; 'none'")
     p.add_argument("--error_rate", type=float, default=0.01)
     p.add_argument("--as_delta", type=int, default=30)
+    p.add_argument("--workers", type=int, default=0,
+                   help="Parallel workers (= group2 chunks, set at the classification). 0 (default): --cpus // 4 with bowtie2 candidates (each worker runs bowtie2 on 4 threads); with --candidates index, one single-threaded worker per CPU, limited by the available memory (~2.5 GB per worker + ~5 GB shared, measured on the human genome)")
+    p.add_argument("--max_combinations", type=int, default=5000,
+                   help="Pairs with more candidate combinations are drawn hierarchically (near combinations exact, far ones by importance sampling; indistinguishable from the exact draw on yeast, ~3 ms per pair; 0 = always exact; default 5000)")
     p.add_argument("--seed", type=int, default=0)
     # matrices
     p.add_argument("--hicstuff", action="store_true",
@@ -161,6 +207,8 @@ def main():
         args.mode = "ps" if omics else "full"
     if args.bin_size is None:
         args.bin_size = 200 if omics else 2000
+    if args.ps_linear is None:
+        args.ps_linear = 0
     if omics and args.mode == "full":
         p.error("--data omics: use --mode standard (no 2D density for non-Hi-C data)")
     if omics:
@@ -200,6 +248,23 @@ def main():
         log("Building the bowtie2 index ...")
         subprocess.run(["bowtie2-build", "--threads", str(args.cpus), args.genome, index],
                        check=True, stdout=subprocess.DEVNULL)
+
+    def repeat_index_prefix():
+        """Prefix of the repeat index (built when missing with 'auto'), None if off."""
+        if args.repeat_index == "none" or str(args.max_alignments) == "all":
+            return None
+        if args.repeat_index != "auto":
+            return args.repeat_index
+        prefix = dirs["index"] / "repeats_k31_w10"
+        if not Path(str(prefix) + ".idx").is_dir() or not Path(str(prefix) + ".genome.u8").is_file():
+            import repeat_index_v2 as rix
+            dirs["index"].mkdir(exist_ok=True)
+            log("Repeat index (minimizers of the repeated sequences) ...")
+            rix.build_repeat_index(args.genome, prefix, log=lambda m: log(m))
+        return str(prefix)
+
+    if run_stage("index", args) and not omics:
+        repeat_index_prefix()
 
     # --- mappability ---
     # k-mer length = read length (longest of the first reads of R1)
@@ -265,7 +330,15 @@ def main():
                                 "-x", index, "-U", str(fq), "-S", str(sam)], check=True, stderr=lg)
 
     # --- classify ---
-    n_chunks = max(1, args.cpus // 4)
+    n_chunks = n_workers(args, omics)
+    if run_stage("classify", args) or run_stage("rescue", args):
+        log(f"{n_chunks} workers / group2 chunks"
+            + (" (index-only: one per CPU within the available memory)"
+               if args.candidates == "index" and not args.workers and not omics else ""))
+        done = list((dirs["classifier"]).glob("group2_1_chunk*.fastq"))
+        if done and not run_stage("classify", args) and len(done) != n_chunks:
+            log(f"  note: the classification made {len(done)} chunks → {min(len(done), n_chunks)} "
+                "workers at most (run the classification again to change it)")
     if run_stage("classify", args):
         import streaming_classifier_v2 as sc
         log("Classifying the pairs ...")
@@ -287,7 +360,8 @@ def main():
                                else int(args.density_n_min),
                                density_bin_size=args.density_bin_size
                                if args.density_bin_size == "auto" else int(args.density_bin_size),
-                               plot_chroms=plot_chroms, density=args.mode == "full")
+                               plot_chroms=plot_chroms, density=args.mode == "full",
+                               ps_linear_until=args.ps_linear)
         if args.exit_stage == "stats":
             log(f"Checkpoint: check {dirs['statistics'] / 'plots'}, then run again with "
                 f"--start_stage rescue")
@@ -299,7 +373,10 @@ def main():
         ra.reattribute(dirs["classifier"], dirs["statistics"], dirs["rescue"], index, args.mode,
                        args.max_alignments, args.as_delta, n_workers=n_chunks,
                        threads=max(1, args.cpus // n_chunks), bin_size=args.bin_size,
-                       seed=args.seed, error_rate=args.error_rate)
+                       seed=args.seed, error_rate=args.error_rate,
+                       repeat_index=None if omics else repeat_index_prefix(),
+                       index_only=args.candidates == "index" and not omics,
+                       max_combinations=args.max_combinations)
 
     # --- omics: signal tracks instead of the matrices ---
     if omics and run_stage("matrices", args):

@@ -56,6 +56,9 @@ COVERAGE_KEPT  = "coverage_kept.npy"  # coverage bins used (others interpolated)
 DENSITY_MAP    = "density_map.npy"    # 2D density (density_v2), float32
 DENSITY_BIN    = "density_bin_size.npy"  # bin size of the density (may differ from bin_size)
 DENSITY_MASK   = "density_mask.npy"   # {chrom: (bad bins, mappable weights)} at the density bin
+# refined density of the small, densely covered molecules (mitochondria, endosymbionts, plasmids)
+DENSITY_FINE_MAP, DENSITY_FINE_BIN, DENSITY_FINE_MASK = \
+    "density_fine_map.npy", "density_fine_bin_size.npy", "density_fine_mask.npy"
 CONTACTS       = "contacts.npz"       # contact matrix at bin_size (upper triangle, scipy sparse)
 
 # Orientation codes (after ordering reads by position)
@@ -147,11 +150,19 @@ def iter_pairs(pairs_path, chrom_names, chunksize):
 # Log binning (identical to hicberg.statistics.generate_xs)
 # ---------------------------------------------------------------------------
 
-def generate_xs(chromosome_size, base=1.1):
-    """Log-spaced distance bins, starting with 0."""
+def generate_xs(chromosome_size, base=1.1, linear_until=0, linear_step=2):
+    """
+    Log-spaced distance bins, starting with 0. linear_until > 0: linear bins of
+    linear_step bp up to linear_until, log bins beyond (omics data: the fragment-
+    length distribution of e.g. MNase-seq is sharp, ~15 bp log bins at 150 bp blur it).
+    """
     n_bins = np.divide(np.log1p(chromosome_size), np.log(base)).astype(int)
     xs = np.unique(np.logspace(0, n_bins, num=n_bins + 1, base=base, dtype=int))
-    return np.insert(xs, 0, 0)
+    xs = np.insert(xs, 0, 0)
+    if linear_until > 0:
+        lin = np.arange(0, min(linear_until, chromosome_size) + 1, linear_step)
+        xs = np.unique(np.concatenate([lin, xs[xs > lin[-1]]]))
+    return xs
 
 
 def attribute_xs(xs, distances):
@@ -207,7 +218,7 @@ def pair_orientation(pos1, pos2, rev1, rev2):
 class Accumulator:
     """Counts accumulated over all chunks of the pairs file."""
 
-    def __init__(self, chrom_sizes, bin_size, base, circular):
+    def __init__(self, chrom_sizes, bin_size, base, circular, linear_until=0, linear_step=2):
         self.names    = list(chrom_sizes)
         self.sizes    = np.array([chrom_sizes[c] for c in self.names], dtype=np.int64)
         self.n_chrom  = len(self.names)
@@ -216,8 +227,8 @@ class Accumulator:
 
         # Global log bins: xs of each chromosome is a prefix of the xs of the
         # largest one (same logspace values), so one searchsorted is enough.
-        self.xs       = {c: generate_xs(L, base) for c, L in chrom_sizes.items()}
-        self.xs_glob  = generate_xs(self.sizes.max(), base)
+        self.xs       = {c: generate_xs(L, base, linear_until, linear_step) for c, L in chrom_sizes.items()}
+        self.xs_glob  = generate_xs(self.sizes.max(), base, linear_until, linear_step)
         self.n_xs     = np.array([len(self.xs[c]) for c in self.names])
 
         # Coverage: all chromosomes concatenated
@@ -613,7 +624,8 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         min_mappability=1.0, coverage_min_fraction=0.3,
                         coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None,
                         density=True, density_n_min=200, density_n_min_trans=200,
-                        density_reproducibility=0.8, density_bin_size=None, plot_chroms=None):
+                        density_reproducibility=0.8, density_bin_size=None, plot_chroms=None,
+                        density_refine=True, ps_linear_until=0, ps_linear_step=2):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -640,7 +652,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
     if coverage_all_reads is not None and mappability is None:
         raise ValueError("--coverage_all_reads needs --mappability (it fills the unmappable bins)")
 
-    acc = Accumulator(chrom_sizes, bin_size, base, circular)
+    acc = Accumulator(chrom_sizes, bin_size, base, circular, ps_linear_until, ps_linear_step)
 
     print(f"Reading {pairs_path} ...")
     for chunk in iter_pairs(pairs_path, acc.names, chunksize):
@@ -707,24 +719,28 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         auto = density_n_min == "auto"
         result = dn.contact_matrix(pairs_path, chrom_sizes, db, chunksize, split_halves=auto)
         matrix, halves = result if auto else (result, None)
-        n_bins, _ = dn.genome_bins(chrom_sizes, db)
+        def density_mask(sizes_, db_):
+            n_bins_, _ = dn.genome_bins(sizes_, db_)
+            mask_ = {}
+            for (c, L), n in zip(sizes_.items(), n_bins_):
+                # a density bin is bad if none of its coverage bins is kept
+                if cov_kept is not None:
+                    k = np.asarray(cov_kept[c], dtype=np.float64)
+                    idx = np.minimum(np.arange(len(k)) * bin_size // db_, n - 1)
+                    bad_c = np.bincount(idx, weights=k, minlength=n)[:n] == 0
+                else:
+                    bad_c = np.zeros(n, dtype=bool)
+                if bg is not None:
+                    frac_c = binned_unique_fraction({c: bg[c]} if c in bg else {}, {c: L}, db_,
+                                                    min_mappability)[c][:n]
+                    w_c = frac_c * np.clip(L - np.arange(n) * db_, 0, db_) / db_
+                else:
+                    w_c = None
+                mask_[c] = (bad_c, w_c)
+            return mask_
+
         bad = weights = None
-        mask = {}
-        for (c, L), n in zip(chrom_sizes.items(), n_bins):
-            # a density bin is bad if none of its coverage bins is kept
-            if cov_kept is not None:
-                k = np.asarray(cov_kept[c], dtype=np.float64)
-                idx = np.minimum(np.arange(len(k)) * bin_size // db, n - 1)
-                bad_c = np.bincount(idx, weights=k, minlength=n)[:n] == 0
-            else:
-                bad_c = np.zeros(n, dtype=bool)
-            if bg is not None:
-                frac_c = binned_unique_fraction({c: bg[c]} if c in bg else {}, {c: L}, db,
-                                                min_mappability)[c][:n]
-                w_c = frac_c * np.clip(L - np.arange(n) * db, 0, db) / db
-            else:
-                w_c = None
-            mask[c] = (bad_c, w_c)
+        mask = density_mask(chrom_sizes, db)
         if cov_kept is not None:
             bad = np.concatenate([mask[c][0] for c in chrom_sizes])
         if bg is not None:
@@ -744,6 +760,35 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         np.save(output_dir / DENSITY_BIN, db)
         np.save(output_dir / DENSITY_MASK, mask)
         sparse.save_npz(output_dir / CONTACTS, sparse.triu(matrix).tocsr())
+
+        # refined density: molecules whose own contacts support a bin >= 4x finer than the global
+        # one (the global bin is set by the largest, sparsest chromosomes: mosquito 200 kb, so
+        # Wolbachia (1.37 Mb) had 7 density bins); one finer map for these molecules together
+        for f in (DENSITY_FINE_MAP, DENSITY_FINE_BIN, DENSITY_FINE_MASK):
+            (output_dir / f).unlink(missing_ok=True)
+        if density_refine:
+            pc = acc.ps_counts_by_chrom()
+            own = {c: dn.data_density_bin_size({c: pc[c]}, acc.xs, {c: L}, bin_size,
+                                               n_min=int(density_n_min))[0]
+                   for c, L in chrom_sizes.items()}
+            # enough intra contacts to estimate a fine density (else tiny scaffolds qualify by default)
+            n_intra = {c: float(np.asarray(pc[c]).sum()) for c in chrom_sizes}
+            fine = {c: b for c, b in own.items() if 4 * b <= db and n_intra[c] >= 20 * int(density_n_min)}
+            if fine:
+                sizes_f = {c: chrom_sizes[c] for c in chrom_sizes if c in fine}
+                db_f = max(max(fine.values()), dn.auto_density_bin_size(sizes_f, bin_size))
+                if 4 * db_f <= db:
+                    mask_f = density_mask(sizes_f, db_f)
+                    bad_f = np.concatenate([mask_f[c][0] for c in sizes_f]) if cov_kept is not None else None
+                    w_f = np.concatenate([mask_f[c][1] for c in sizes_f]) if bg is not None else None
+                    mat_f = dn.contact_matrix(pairs_path, sizes_f, db_f, chunksize)
+                    maps_f = dn.density_maps(mat_f, sizes_f, db_f, bad_f, method="unbiased",
+                                             smoothing="gaussian", n_min=int(density_n_min),
+                                             n_min_trans=int(density_n_min_trans), weights=w_f)
+                    np.save(output_dir / DENSITY_FINE_MAP, {k: v.astype(np.float32) for k, v in maps_f.items()})
+                    np.save(output_dir / DENSITY_FINE_BIN, db_f)
+                    np.save(output_dir / DENSITY_FINE_MASK, mask_f)
+                    print(f"  refined density ({db_f / 1000:g} kb bins) for: {', '.join(sizes_f)}")
 
     # --- Stats ---
     s = acc.stats

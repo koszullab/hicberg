@@ -13,6 +13,9 @@ Outputs:
   - unrescued.pairs          : pairtools format (group1)
   - group2_1_chunk{i}.fastq  : group2 R1 split by n_cpus
   - group2_2_chunk{i}.fastq  : group2 R2 split by n_cpus
+  - group2_hits_chunk{i}.tsv : best alignment of each group2 read, same order as the FASTQ
+                               (name, then for R1 and R2: chrom, 5' position, strand, AS,
+                               unique 0/1), used by the index-only re-attribution
   - chimeric_names.txt       : read names of chimeric reads
   - stats.txt                : summary statistics
   - coverage_all_reads.npz   : (option) 5' positions of all aligned reads (incl. ambiguous,
@@ -171,6 +174,7 @@ def get_strand(read):
 # split once (tags kept as a single string) and XS is found by substring search.
 
 _REF_CONSUMING = re.compile(r'(\d+)[MDN=X]')
+_AS_TAG = re.compile(r"(?:^|\t)AS:i:(-?\d+)")
 
 
 def split_sam(line):
@@ -396,6 +400,7 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         open(output_dir / f"group2_2_chunk{i}.fastq", 'w')
         for i in range(n_cpus)
     ]
+    g2_hits = [open(output_dir / f"group2_hits_chunk{i}.tsv", 'w') for i in range(n_cpus)]
 
     # --- Counters ---
     stats = {
@@ -541,6 +546,13 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             stats['chunk_index'] += 1
             write_fastq_record(g2_r1_files[chunk_idx], r1['query_name'], seq1, qual1)
             write_fastq_record(g2_r2_files[chunk_idx], r2['query_name'], seq2, qual2)
+            hits = []
+            for f in (f1, f2):
+                rev = bool(int(f[1]) & 16)
+                m = _AS_TAG.search(f[11])
+                hits.append(f"{f[2]}\t{fast_outer_5prime(f, rev)}\t{'-' if rev else '+'}\t"
+                            f"{m.group(1) if m else 0}\t{int(is_unique(f, min_mapq))}")
+            g2_hits[chunk_idx].write(f"{r1['query_name']}\t" + "\t".join(hits) + "\n")
 
     if cov_all is not None:
         cov_all.save(output_dir / COVERAGE_ALL)
@@ -549,7 +561,7 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     f_group0.close()
     f_chimeric.close()
     f_pairs.close()
-    for fh in g2_r1_files + g2_r2_files:
+    for fh in g2_r1_files + g2_r2_files + g2_hits:
         fh.close()
 
     # --- PCR duplicates of the unique pairs on their coordinates (± dedup_tol bp) ---
