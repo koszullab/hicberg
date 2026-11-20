@@ -19,6 +19,7 @@ Last step of the pipeline: contact matrices before / after re-attribution.
 import gzip
 import itertools
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,7 +38,88 @@ from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 MNASE_FRAGMENT = 100     # Micro-C: virtual fragment size (bp) for hicstuff event filtering
 
 
-def hicstuff_filter(pairs, genome, enzyme, out_dir, threads=4, prefix=None, thresholds=None):
+def _hicstuff_enzyme(enzyme):
+    enz = str(enzyme).strip()
+    if enz.lower() == "mnase":
+        return MNASE_FRAGMENT
+    if enz.isdigit():
+        return int(enz)
+    return enz.split(",") if "," in enz else enz
+
+
+def restriction_table(genome, enzyme):
+    """hicstuff restriction table {chrom: fragment starts} (one pass over the genome)."""
+    import logging
+    import hicstuff.digest as hcd
+    import hicstuff.io as hio
+    from Bio import SeqIO
+    enz = _hicstuff_enzyme(enzyme)
+    logging.info("digestion: %s", f"virtual {enz} bp fragments" if isinstance(enz, int) else enz)
+    return {rec.id: hcd.get_restriction_table(rec.seq, enz)
+            for rec in SeqIO.parse(hio.read_compressed(str(genome)), "fasta")}
+
+
+def hicstuff_filter_rescued(unrescued_filtered, predicted, genome, enzyme, out_dir, thresholds,
+                            threads=4, table=None):
+    """
+    Filtered rescued pairs without filtering the unique pairs again: rescued = unrescued +
+    predicted, so only predicted.pairs goes through hicstuff (same thresholds as unrescued), then
+    the two filtered files (both sorted by hicstuff: chr1 V, pos1 n, chr2 V, pos2 n, then the whole
+    line) are merged (sort -m, same order as sorting the union) and the PCR duplicates between them
+    are removed with hicstuff's rule (a pair whose coordinates, strands and fragments equal those of
+    the previous line). Same result as hicstuff on rescued.pairs, ~40 % less time on the human
+    genome. Output: out_dir/hicstuff_rescued/rescued.valid_idx_filtered_pcrfree.pairs.
+    """
+    out_dir = Path(out_dir)
+    work = out_dir / "hicstuff_predicted"
+    work.mkdir(parents=True, exist_ok=True)
+    pred7 = work / "predicted.pairs"
+    with open(predicted) as src, open(pred7, "w") as dst:      # 7 standard columns for hicstuff
+        for line in src:
+            if line.startswith("#columns"):
+                dst.write("#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n")
+            elif line[0] == "#":
+                dst.write(line)
+            else:
+                dst.write("\t".join(line.split("\t", 7)[:7]).rstrip("\n") + "\n")
+    pred_f, _ = hicstuff_filter(pred7, genome, enzyme, out_dir, threads, "predicted",
+                                thresholds=thresholds, table=table)
+    pred7.unlink()
+    res = out_dir / "hicstuff_rescued"
+    res.mkdir(parents=True, exist_ok=True)
+    out = res / "rescued.valid_idx_filtered_pcrfree.pairs"
+    header = []
+    with open(unrescued_filtered) as fh:
+        for line in fh:
+            if line[0] != "#":
+                break
+            header.append(line)
+    n_dup = 0
+    with open(out, "w") as dst:
+        dst.writelines(header)
+        dst.flush()
+        body = lambda f: f"<(grep -v '^#' {shlex.quote(str(f))})"
+        cmd = (f"sort -m -k2,2V -k3,3n -k4,4V -k5,5n {body(unrescued_filtered)} "
+               f"{body(pred_f)}")
+        proc = subprocess.Popen(["bash", "-c", cmd], stdout=subprocess.PIPE, text=True,
+                                bufsize=1 << 20)
+        prev = None
+        for line in proc.stdout:
+            key = line.split("\t", 1)[1]
+            if key == prev:
+                n_dup += 1
+                continue
+            prev = key
+            dst.write(line)
+        if proc.wait() != 0:
+            raise RuntimeError("merge of the filtered unrescued / predicted pairs failed")
+    with open(res / "merge.log", "w") as fh:
+        fh.write(f"rescued = {unrescued_filtered} + {pred_f}\n"
+                 f"PCR duplicates between the two sets removed: {n_dup}\n")
+    return out, n_dup
+
+
+def hicstuff_filter(pairs, genome, enzyme, out_dir, threads=4, prefix=None, thresholds=None, table=None):
     """
     hicstuff processing of a pairs file (4DN header with chr1 / chr2 and
     #chromsize lines), with the hicstuff library functions called one by one
@@ -59,6 +141,7 @@ def hicstuff_filter(pairs, genome, enzyme, out_dir, threads=4, prefix=None, thre
                         must be filtered like the unrescued ones, else the
                         before / after comparison is biased: on yeast hicstuff
                         estimated 19-25 on unrescued but 8-10 on rescued)
+      table: restriction table (restriction_table()), computed here if None.
     Returns (filtered PCR-free pairs path, (uncut, loop) thresholds used).
     The hicstuff log goes to out_dir/hicstuff_<prefix>/hicstuff.log.
     """
@@ -79,17 +162,8 @@ def hicstuff_filter(pairs, genome, enzyme, out_dir, threads=4, prefix=None, thre
         import hicstuff.io as hio
         from hicstuff.pipeline import filter_pcr_dup
         idx = work / f"{prefix}.valid_idx.pairs"
-        enz = str(enzyme).strip()
-        if enz.lower() == "mnase":
-            enz = MNASE_FRAGMENT
-        elif enz.isdigit():
-            enz = int(enz)
-        else:
-            enz = enz.split(",") if "," in enz else enz
-        logging.info("digestion: %s", f"virtual {enz} bp fragments" if isinstance(enz, int) else enz)
-        from Bio import SeqIO
-        table = {rec.id: hcd.get_restriction_table(rec.seq, enz)
-                 for rec in SeqIO.parse(hio.read_compressed(str(genome)), "fasta")}
+        if table is None:
+            table = restriction_table(genome, enzyme)
         hcd.attribute_fragments(str(pairs), str(idx), table)
         hio.sort_pairs(str(idx), str(idx) + ".sorted", keys=["chr1", "pos1", "chr2", "pos2"],
                        threads=threads, tmp_dir=str(tmp))
@@ -293,11 +367,35 @@ def restriction_sites(genome, chrom_sizes, bin_size, enzymes):
 # Before / after plots (v1 style + mappability)
 # ---------------------------------------------------------------------------
 
+def display_names(genome):
+    """
+    Readable sequence names for the plots, from the FASTA headers: '... chromosome 1' → chr1,
+    '... chromosome X' → chrX, '... mitochondrion ...' → Mitochondria; other sequences (and any
+    name that would not be unique) keep their identifier.
+    """
+    names = {}
+    opener = gzip.open if str(genome).endswith(".gz") else open
+    with opener(genome, "rt") as fh:
+        for line in fh:
+            if line[0] != ">":
+                continue
+            ident, _, desc = line[1:].strip().partition(" ")
+            m = re.search(r"\bchromosome\s+([0-9]+|[XYZW])\b", desc)
+            if m:
+                names[ident] = f"chr{m.group(1)}"
+            elif re.search(r"\bmitochondri(on|al)\b", desc, re.I):
+                names[ident] = "Mitochondria"
+    counts = {}
+    for v in names.values():
+        counts[v] = counts.get(v, 0) + 1
+    return {k: v for k, v in names.items() if counts[v] == 1}
+
+
 def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None, gc=None,
                       sites=None, enzyme_label="restriction sites", chrom_pairs=None,
                       intra_only=False, vmin_raw=None, vmax_raw=None,
                       labels=("unrescued", "rescued"), repeat_links=None, min_link_kmers=3,
-                      max_arcs=400):
+                      max_arcs=400, display_names=None):
     """
     Two multi-page PDFs (matrices_raw.pdf, matrices_normalised.pdf), one page
     per pair of chromosomes (all pairs, or intra only, or chrom_pairs), as in
@@ -435,6 +533,8 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         v[:min(n, len(values))] = np.asarray(values, dtype=np.float64)[:n]
         return v
 
+    nm = lambda c: (display_names or {}).get(c, c)
+
     def page(pdf, a, b, balance):
         m_u = unres.matrix(balance=balance).fetch(a, b).astype(np.float64)
         m_r = res.matrix(balance=balance).fetch(a, b).astype(np.float64)
@@ -495,9 +595,9 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
             ax = fig.add_axes(frac(x0, map_y, side, h_map))
             im = opaque_imshow(ax, z, cmap, vmin, vmax, bad="white", extent=extent, aspect="auto")
             pad = 6 + (72 * (arc_h + 0.1) if arcs is not None and a != b else 0)
-            ax.set_title(f"{lab} — {a} × {b} — {kind}, {kb:g} kb bins\n"
+            ax.set_title(f"{lab} — {nm(a)} × {nm(b)} — {kind}, {kb:g} kb bins\n"
                          f"{n_contacts[col]:,} contacts", fontsize=9, pad=pad)
-            ax.set_ylabel(f"{a} (kb)", fontsize=8)
+            ax.set_ylabel(f"{nm(a)} (kb)", fontsize=8)
             ax.tick_params(labelbottom=False, labelsize=7)
             cax = fig.add_axes(frac(x0 + side + 0.1, map_y, cb, h_map))
             fig.colorbar(im, cax=cax, label="log10 contacts")
@@ -545,7 +645,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                 tr.tick_params(labelsize=6, labelbottom=(k == len(tracks) - 1))
                 tr.set_xlim(extent[0], extent[1])
                 if k == len(tracks) - 1:
-                    tr.set_xlabel(f"{b} (kb)", fontsize=8)
+                    tr.set_xlabel(f"{nm(b)} (kb)", fontsize=8)
         pdf.savefig(fig)
         plt.close(fig)
 

@@ -397,12 +397,22 @@ def main():
         suffix = ""
         if args.hicstuff:
             log("hicstuff filtering (non-informative events, PCR duplicates) ...")
+            table = mx.restriction_table(args.genome, args.enzyme)
             unrescued, thresholds = mx.hicstuff_filter(unrescued, args.genome, args.enzyme,
-                                                       dirs["matrices"], args.cpus, "unrescued")
+                                                       dirs["matrices"], args.cpus, "unrescued",
+                                                       table=table)
             log(f"  thresholds estimated on unrescued: uncuts {thresholds[0]}, loops {thresholds[1]}"
-                " → applied to rescued too")
-            rescued, _ = mx.hicstuff_filter(rescued, args.genome, args.enzyme, dirs["matrices"],
-                                            args.cpus, "rescued", thresholds=thresholds)
+                " → applied to the predicted pairs too")
+            predicted = dirs["rescue"] / "predicted.pairs"
+            if predicted.is_file():                 # rescued = filtered unrescued + filtered predicted
+                rescued, n_dup = mx.hicstuff_filter_rescued(unrescued, predicted, args.genome,
+                                                            args.enzyme, dirs["matrices"], thresholds,
+                                                            args.cpus, table)
+                log(f"  rescued = filtered unrescued + filtered predicted ({n_dup:,} PCR duplicates "
+                    "between them removed)")
+            else:
+                rescued, _ = mx.hicstuff_filter(rescued, args.genome, args.enzyme, dirs["matrices"],
+                                                args.cpus, "rescued", thresholds=thresholds, table=table)
             suffix = ".filtered"
         log("Cooler matrices (ICE balancing) ...")
         cool_u = mx.build_cool(unrescued, sizes, args.bin_size,
@@ -433,7 +443,7 @@ def main():
             list(itertools.combinations_with_replacement(plot_chroms, 2))
         mx.plot_before_after(plot_u, plot_r, dirs["matrices"] / "plots", mappability=mapp, gc=gc,
                              sites=sites, enzyme_label=f"{args.enzyme} sites" if args.enzyme else "",
-                             chrom_pairs=pairs,
+                             chrom_pairs=pairs, display_names=mx.display_names(args.genome),
                              labels=(f"unrescued{suffix}", f"rescued{suffix}"),
                              repeat_links=links_file if links_file and links_file.is_file() else None)
 

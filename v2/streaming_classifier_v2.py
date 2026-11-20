@@ -25,6 +25,7 @@ Outputs:
 import os
 import sys
 import re
+import shlex
 import argparse
 import subprocess
 from pathlib import Path
@@ -466,12 +467,14 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             unique = is_unique(f1, min_mapq) and is_unique(f2, min_mapq)
 
             # ----------------------------------------------------------------
-            # PCR duplicates: identical (R1, R2) sequences, sequenced orientation
+            # PCR duplicates: identical (R1, R2) sequences, sequenced orientation;
+            # the pair is unordered (the two strands of one ligation product give
+            # the same pair with R1 and R2 swapped, as pairtools dedup flips them)
             # ----------------------------------------------------------------
             if dedup:
                 s1 = f1[9].translate(_REVCOMP)[::-1] if flag1 & 16 else f1[9]
                 s2 = f2[9].translate(_REVCOMP)[::-1] if flag2 & 16 else f2[9]
-                key = hash((s1, s2))
+                key = hash((s1, s2) if s1 <= s2 else (s2, s1))
                 if key in seen:
                     stats['dup_group1' if unique else 'dup_group2'] += 1
                     continue
@@ -606,8 +609,12 @@ def dedup_coordinates(pairs_path, tol=3, tmp_dir=None):
     default 3). Catches the PCR "jackpots" missed by the sequence dedup: copies of one
     molecule that differ by sequencing errors and by 1-4 bp of local-alignment clipping
     (mosquito: 104 copies of one chr1 x chr3 pair, at 5 positions within 4 bp, made a
-    density hotspot). The file is sorted externally (GNU sort, any size) and rewritten
-    in place. Returns (pairs read, pairs removed).
+    density hotspot). The pair is unordered: its two ends are compared in a canonical
+    order (smaller chromosome / position first), so that a copy with R1 and R2 swapped
+    is found (as pairtools flips the pairs; mosquito: 12 % of the unique pairs were such
+    swapped copies). The lines themselves are written unchanged. The file is sorted
+    externally (GNU sort, any size) and rewritten in place. Returns (pairs read, pairs
+    removed).
     """
     pairs_path = Path(pairs_path)
     header, n_in, n_dup = [], 0, 0
@@ -618,21 +625,26 @@ def dedup_coordinates(pairs_path, tol=3, tmp_dir=None):
             header.append(line)
     tmp = pairs_path.with_suffix(".sorted.tmp")
     env = dict(os.environ, LC_ALL="C")
-    cmd = ["sort", "-t", "\t", "-k2,2", "-k4,4", "-k6,6", "-k7,7", "-k3,3n", "-k5,5n",
+    # canonical ends prepended (6 columns), sorted on them, stripped when written
+    flip = ("awk 'BEGIN{FS=OFS=\"\\t\"} /^#/{next} "
+            "{if ($2 < $4 || ($2 == $4 && $3+0 <= $5+0)) print $2,$3,$6,$4,$5,$7,$0; "
+            "else print $4,$5,$7,$2,$3,$6,$0}' " + shlex.quote(str(pairs_path)))
+    cmd = ["sort", "-t", "\t", "-k1,1", "-k4,4", "-k3,3", "-k6,6", "-k2,2n", "-k5,5n",
            "-S", "2G", "-o", str(tmp)]
     if tmp_dir:
         cmd += ["-T", str(tmp_dir)]
-    grep = subprocess.Popen(["grep", "-v", "^#", str(pairs_path)], stdout=subprocess.PIPE)
-    subprocess.run(cmd, stdin=grep.stdout, check=True, env=env)
-    grep.wait()
+    src = subprocess.Popen(["bash", "-c", flip], stdout=subprocess.PIPE, env=env)
+    subprocess.run(cmd, stdin=src.stdout, check=True, env=env)
+    if src.wait() != 0:
+        raise RuntimeError(f"canonical ordering of {pairs_path} failed")
     out_path = pairs_path.with_suffix(".dedup.tmp")
     with open(tmp) as fh, open(out_path, "w") as out:
         out.writelines(header)
         group, window = None, []
         for line in fh:
-            f = line.split("\t", 7)
-            key = (f[1], f[3], f[5], f[6].rstrip("\n"))
-            p1, p2 = int(f[2]), int(f[4])
+            f = line.split("\t", 6)
+            key = (f[0], f[3], f[2], f[5])
+            p1, p2 = int(f[1]), int(f[4])
             n_in += 1
             if key != group:
                 group, window = key, []
@@ -641,7 +653,7 @@ def dedup_coordinates(pairs_path, tol=3, tmp_dir=None):
                 n_dup += 1
                 continue
             window.append((p1, p2))
-            out.write(line)
+            out.write(f[6])
     tmp.unlink()
     out_path.replace(pairs_path)
     return n_in, n_dup

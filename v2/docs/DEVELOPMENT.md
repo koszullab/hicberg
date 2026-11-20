@@ -1,5 +1,11 @@
 # HiCberg Human-Scale — Development Notes
 
+## Pipeline overview
+
+![HiCberg v2 pipeline](figures/hicberg_v2_pipeline.png)
+
+*One-page diagram of the v2 pipeline (PDF: `figures/hicberg_v2_pipeline.pdf`; regenerate with `python3 docs/figures/make_pipeline_figure.py`). Updated 2026-11-20.*
+
 ## Context
 
 HiCberg is a pipeline to rescue multi-mapping reads in Hi-C / Micro-C data.
@@ -1244,3 +1250,166 @@ false contacts with the whole genome; one PCR-amplified molecule of this kind wa
   in the assembly at the mappability stage → `mappability/adapter_sites.tsv` and a warning. Mosquito
   (VPISU_Cqui_1.0 + wPipMtq): 9 pieces (chr1 114.2; chr2 65.7, 93.0, 204.3, 213.8; chr3 35.4, 89.9, 123.9,
   132.7 Mb); yeast T2T: none.
+
+### Refined density for small, densely covered molecules; fine P(s) bins for omics (2026-11-18)
+
+**Refined density.** The density bin is genome-wide and set by the largest, sparsest chromosomes (mosquito:
+200 kb), so *Wolbachia* (1.37 Mb, ~390,000 intra contacts) had 7 density bins. `statistics_v2` now computes,
+after the global map, the data-driven bin of each molecule from its own contacts; molecules supporting a bin
+>= 4 × finer, with >= 20 × n_min intra contacts, get one refined map together (`density_fine_map.npy`, mosquito:
+2 kb for the mitochondrion, wPipMtq and pWCP_MTQ); `Laws.density_of` uses it when both candidates are in these
+molecules. Mosquito (same pairs as the final run): WOPIp1 × WOPIp5 rescued contacts 11,086 → 7,097 (less
+spreading of the ambiguous phage reads across the origin), WOPIp4 × WOPIp5 unchanged (2,913 → 2,915); the
+prophage domains are sharper in the rescued map (`moustic/manuscript/figures/extra/WO_prophages_zoom_fine_density.pdf`).
+This run (`moustic/pipeline_v2_mitoMM265a_v3_fine`, made self-contained) is now the reference of the MM265a
+manuscript (`moustic/manuscript/`); the older mosquito runs were deleted on 2026-11-19 (numbers kept here).
+(The first run also refined 53 tiny scaffolds with almost no contacts; fixed by the contact threshold.)
+
+**Fine P(s) bins (`--ps_linear`, default 0).** Linear 2 bp bins up to 1 kb instead of log bins (1.1, ~15 bp at
+150 bp), tested on MNase-seq reads with three synthetic 2 kb tandem arrays (periods 20, 60, 150 bp; truth known):
+fragments placed at their true position (± 2 bp), log vs linear bins — border fragments 33.0 / 32.1 %,
+48.9 / 48.9 %, 60.5 / 59.7 %; inside the arrays 0.4 / 0.4 %, 1.8 / 1.9 %, 6.6 / 6.6 %. No gain: the MNase
+fragment-length distribution is too broad to separate placements shifted by one period. Kept as an option, off.
+
+**Cohesin benchmark, shape of the peaks.** Inside identical copies the reconstructed profile is a blend of the
+two true profiles (reads of both copies pooled, then redistributed fragment by fragment): standard restores the
+amount of signal of each copy, not its shape (small peaks of the unenriched copy are erased, a bump of the
+other copy can appear). Overview: `/media/axel/EVO/data_for_v2/omics_figures/Fig_cohesin_overview.pdf`.
+
+### Human pilot (20 M pairs, CHM13): bowtie2 -k 100 vs repeat index (2026-11-20)
+
+SRR13849430 (Arima, 4 enzymes), first 20 M pairs, T2T CHM13 v2.0, `--intra_only`
+(`/media/axel/EVO/data_for_v2/human/pilot_20M` and `pilot_20M_index`, same classification, 11.6 M
+ambiguous pairs re-attributed, 5 workers).
+
+| | bowtie2 -k 100 | + repeat index (`chm13_k31_w10`) |
+|---|---|---|
+| re-attribution time | 11,828 s (3 h 17) | 29,898 s (8 h 18, ×2.5) |
+| candidates per read | R1 9.8, R2 9.9 | R1 171, R2 189 |
+| combinations per pair | 374 | 239,065 (3,557 evaluated) |
+| reads with a saturated -k 100 list | — | 4.39 M (18.9 %), 941 bins per read from the index |
+| predicted pairs intra | 88.4 % | 90.1 % |
+| max RSS (whole run) | 6.8 GB (whole pipeline) | 3.9 GB (rescue + matrices) |
+
+Coverage of the predicted pairs at 1 Mb: correlation 0.88, but only 1.3 % of the read ends move.
+Per chromosome the totals are within ±2 % (chrY 1,866 → 772). The differences are in the satellite
+arrays: with -k 100 the saturated reads pile up on the first 100 hits bowtie2 reports, e.g. chr1
+126-127 Mb (HSat2: 116,825 → 22,264 read ends) and chr16 52 Mb (40,146 → 13,787). With the index
+they spread over the whole array (chr1 131-141 Mb +30-50 % each) and the acrocentric short
+arms (chr15 7-10 Mb). The index therefore removes the -k 100 pile-ups, at 2.5× the time.
+Note: the index run was launched without `--hicstuff` (no filtered matrices; to redo with it for a
+comparison of the maps). Index `--min_count 2` (`chm13_k31_w10_min2`) built: 22 min 29, 14.2 GB RAM,
+15.3 M repeated minimizers covering 21.7 % of the occurrences; not tested yet.
+
+Follow-up (2026-11-20):
+- The over-covered Mb left with the index (chr1 HSat2 129-141 Mb, chr15 / chr22 short arms, ×4-6 the
+  median) have no unique pair (mappability ~0): they are filled by the re-attribution only, at the
+  same level with bowtie2 -k 100. The restriction-site track (4 enzymes) shows ~45,000 sites per Mb in
+  chr1 128-143 Mb vs ~15,000 elsewhere: the ×3 coverage is the digestion, not an over-attribution.
+- `--max_combinations` (hierarchical draw) is now a CLI option, default 5000 (was not passed by
+  hicberg_v2.py: always exact). The pilot had pairs with 239,065 combinations on average.
+- Test of `--candidates index` (no second bowtie2) with `chm13_k31_w10_min2` and the hierarchical
+  draw: `pilot_20M_idxonly/` (SAM = first 20 M reads of full_run, same order with --reorder).
+- 1 Mb plots of a finished run: `human/scripts/plots_at_resolution.py`.
+- Workers in index-only mode (2026-11-20): with `--cpus 22` the pipeline made `cpus // 4` = 5 chunks
+  (room for bowtie2 -p 4), but index-only workers are single-threaded Python: load 6 / 22, 39 % of the
+  pilot in 1 h 30 (~3 h 50 in all, ~46 h extrapolated to 242 M pairs). Memory per worker measured with
+  smaps_rollup: RSS 7.8 GB, of which 4.2 GB shared (genome codes + repeat index, memory-mapped),
+  1.2-1.6 GB private. `n_workers()` (hicberg_v2.py): index-only → one worker per CPU within
+  (MemAvailable - 5 GB) / 2.5 GB; `--workers N` forces it. The number of chunks is set at the
+  classification (a note is logged if the rescue is started on chunks of another number).
+  Pilot re-launched from the classification with 18 workers.
+
+### PCR duplicates with swapped mates; hicstuff on the predicted pairs only (2026-11-20)
+
+**Bug.** The two strands of one ligation product give the same pair with R1 and R2 swapped (pairtools
+dedup flips the pairs before comparing them). Both dedups of the classifier compared the pairs in the
+sequenced order: the sequence dedup (hash of (R1, R2)) and the coordinate dedup (± 3 bp). hicstuff,
+after them, put the reads in fragment order but its output is no longer sorted (`sort -c` fails) and
+its PCR filter only compares consecutive lines, so it caught a minority of them. Swapped copies in
+`classifier/unrescued.pairs`: mosquito `_fine` 114,022 / 940,742 (12.1 %; 76,207 still in the
+hicstuff-filtered file, 12 %), human pilot 11,415 / 7.6 M (0.15 %).
+**Fix.** Sequence key = the unordered pair of sequences; `dedup_coordinates` sorts and compares
+canonical ends (smaller chromosome / position first), the lines are written unchanged. Tests
+`test_swapped_mates_are_duplicates`, `test_dedup_coordinates_swapped_mates`. Mosquito re-run with the
+same options as `_fine` (`--repeat_index none --max_combinations 0`): `pipeline_v2_mitoMM265a_v3_fine_dedup`.
+
+**hicstuff on predicted only.** rescued = unrescued + predicted, so hicstuff filtered the unique pairs
+twice. `matrices_v2.hicstuff_filter_rescued`: predicted.pairs filtered alone with the unrescued
+thresholds, merged with the filtered unrescued pairs (`sort -m`, hicstuff's key order), PCR
+duplicates between the two sets removed with hicstuff's rule; restriction table computed once
+(`restriction_table`). Mosquito `_fine`: 2,005,969 vs 2,004,228 pairs (+0.09 %, the hicstuff dedup
+being order-dependent), no time gained at this size (~160 s vs 146 s).
+Human pilot, hicstuff on predicted only (machine loaded by the 18-worker pilot, times indicative):
+restriction table 703 s (computed twice before, now once), predicted + merge 530 s vs 900 s for
+rescued before; 13,517,755 vs 13,490,674 pairs (+0.2 %).
+
+Readable names in the before / after plots (`matrices_v2.display_names`, from the FASTA headers:
+chr1 ... chrX, chrY, Mitochondria), used by the pipeline. Human 1 Mb plots
+(`human/scripts/plots_at_resolution.py`): 25 intra + 7 inter pages (chr1×chr2 control, chr1×chr16
+HSat2, acrocentrics chr13×chr14, chr14×chr15, chr15×chr22, chr21×chr22, chr13×chr21).
+
+Human pilot, index-only candidates (`chm13_k31_w10_min2`) + hierarchical draw, 18 workers:
+re-attribution 5,817 s (1 h 37; bowtie2 -k 100: 3 h 17; bowtie2 + index: 8 h 18), placed intra
+90.4 %. Ambiguous reads: 4.0 M aligned in their <= 50 bins, 5.0 M as bins (many copies), 5.7 M
+(25 %) without any repeated minimizer, kept at their first alignment (diverged repeats sharing no
+exact 31-mer minimizer with another copy). 1.85 M pairs (16 %) with > 5,000 combinations drawn
+hierarchically (2.08 M combinations per pair on average).
+
+### Restriction-site laws: distance to the site, ligation junctions (2026-11-20, dev copy `~/hicberg/v2_dev`)
+
+`sites_v2.py` (not merged yet; the full human run was importing the stats / rescue modules):
+1. r(d), d = distance from the 5' end of a read to the next site in its 3' direction, observed /
+   expected (expected = the same unique reads shifted by 2-20 kb), (o + 1) / (e + 1) in counts.
+2. Ligation junctions: the classifier marks the chunks of chimeric ambiguous reads in their FASTQ
+   ('+J3' chunk ends at the junction, '+J5' starts at it) and writes the unique chimeric reads to
+   `junction_reads.tsv`; laws J3(delta = d - aligned length), J5(u = distance to the site behind
+   the 5' end). Weights applied to the exact candidates (bowtie2 and index-only modes), `--site_law`.
+
+**Yeast benchmark with a known truth** (`yeast/site_law_benchmark`: 1,200 unique segments of 150-1,500
+bp copied over other regions; 1.04 M reads unique in a segment become ambiguous between the original
+(true) and the copy; AC1 10 M pairs, 35 bp, DpnII + HinfI; same candidates and seed, law on / off):
+
+| reads | site law off | site law on |
+|---|---|---|
+| all | 78.5 % at the true copy | 78.6 % |
+| mate cis < 100 kb | 99.2 % | 99.3 % |
+| mate far / trans | 49.2 % | 49.5 % |
+| mate far / trans, d differs between the copies (11 %) | 53.2 % | 56.1 % |
+
+Small gain: with 35 bp reads the law is weak (median d 87 bp vs 116 bp shifted) and only 12 % of the
+reads have a different site distance in the two copies (the sites inside a copy are copied too).
+The far / trans mates are a coin toss (49 %): P(s) and the density cannot choose between two copies
+far from the mate. Junction laws not testable on yeast (35 bp reads, no clip > 30 bp).
+Cost: re-attribution 1,995 s vs 223 s (weights computed per pair in Python) → to vectorise by batch.
+
+**Human pilot (150 bp, 4 enzymes)**: 53.1 M sites (376 s). r(d): median d 56 bp vs 41 bp shifted.
+J3: 943,674 unique chimeric reads, a site within 8 bp of the clip for 37.3 % vs 4.7 % shifted (×8);
+J5: 14.5 % vs 13.1 % (no signal). ~20 % of the ambiguous reads are chimeric chunks ('+J' in
+group2 chunk 0: 475,067 R1 reads): the J3 law can weigh their candidates; to measure with a truth.
+
+Follow-up (2026-11-20):
+- Weights vectorised by batches of 20,000 pairs (`Laws.site_weighted`, `SiteLaw.weights_batch`):
+  yeast re-attribution 269 s vs 223 s without the laws (+20 %, was ×9), output identical.
+- Known-truth benchmark without re-aligning (`truth_bench.py`): a read unique inside a copied segment
+  A has exactly two candidates, A (true) and B, and a fixed unique mate; P(A) from the pipeline laws
+  without / with the site laws. Yeast (validates the shortcut, same +3 points as the full benchmark
+  on the reads whose site distance differs between the copies: 59.2 → 62.2 %).
+  Human pilot (150 bp, 4 enzymes, 20,000 segments of 300-3,000 bp, 113,186 truth reads):
+
+| reads | n | P(true), laws | + site laws |
+|---|---|---|---|
+| all | 113,186 | 91.7 % | 91.7 % |
+| mate far / trans | 67,427 | 86.1 % | 86.1 % |
+| mate far / trans, site distance differs between the copies | 316 | 85.7 % | 86.4 % |
+| J3 junction reads | 6,604 | 91.6 % | 91.6 % |
+| J3, mate far / trans, site distance differs | 3 | 99.6 % | 99.6 % |
+
+  **Conclusion: no gain.** With 4 enzymes a site lies every ~60 bp, so the next site (and the
+  junction site of a chimeric read) is almost always inside the copy and copied with it: the site
+  laws see the same context in both copies (0.5 % of the human reads differ, 11 % on yeast with 2
+  enzymes and 35 bp reads). The information they use is part of the repeated sequence itself. They
+  could only help for copies that differ just beyond the read (diverged flanks), not measured here.
+  Note: with the mate far or in trans, P(s) x density already gives 86 % at the true copy on human
+  (58 % on yeast).
+  Not merged into v2 (the code stays in `~/hicberg/v2_dev`).

@@ -170,6 +170,38 @@ def test_dedup_coordinates_tolerance(tmp_path):
     assert len(kept) == 4 and p.read_text().startswith("## pairs format")
 
 
+def test_swapped_mates_are_duplicates(tmp_path):
+    """The two strands of one ligation product give the same pair with R1 and R2 swapped."""
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n"
+    seqA, seqB = "ACGT" * 12, "TTGCA" * 9 + "ACG"
+    def line(name, seq, pos):
+        return "\t".join([name, "0", "chr1", str(pos), "42", f"{len(seq)}M", "*", "0", "0",
+                          seq, "I" * len(seq), "AS:i:96"]) + "\n"
+    # u2 = u1 with R1 / R2 swapped (sequences and positions)
+    r1 = [line("u1", seqA, 500), line("u2", seqB, 9000)]
+    r2 = [line("u1", seqB, 9000), line("u2", seqA, 500)]
+    (tmp_path / "1.sam").write_text(head + "".join(r1))
+    (tmp_path / "2.sam").write_text(head + "".join(r2))
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
+    rows = [l for l in (tmp_path / "out" / "unrescued.pairs").read_text().splitlines()
+            if not l.startswith("#")]
+    assert len(rows) == 1
+
+
+def test_dedup_coordinates_swapped_mates(tmp_path):
+    p = tmp_path / "u.pairs"
+    p.write_text("## pairs format v1.0\n#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n"
+                 "a\tchr1\t100\tchr2\t500\t+\t-\n"
+                 "b\tchr2\t501\tchr1\t102\t-\t+\n"      # a swapped, within 2 bp → duplicate
+                 "c\tchr2\t500\tchr1\t100\t+\t-\n"      # swapped but other strands → kept
+                 "d\tchr1\t300\tchr1\t200\t+\t+\n"
+                 "e\tchr1\t201\tchr1\t299\t+\t+\n")     # d swapped → duplicate
+    assert sc.dedup_coordinates(p, tol=3) == (5, 2)
+    kept = sorted(l.split("\t")[0] for l in p.read_text().splitlines() if not l.startswith("#"))
+    assert kept[0] == "a" and "c" in kept and len(kept) == 3
+    assert "chr2\t500\tchr1\t100" in p.read_text()             # lines written unchanged
+
+
 def test_insert_length_adapter():
     assert sc.insert_length("ACGT" * 9) == 36                                   # no adapter
     assert sc.insert_length("GATCGGAAGAGCACACGTCTGAACTCCAGTCACCG") == 0          # adapter dimer
