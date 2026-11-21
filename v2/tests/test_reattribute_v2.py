@@ -185,3 +185,65 @@ def test_density_of_uses_the_refined_map(stats_dir):
     a, b = laws.code["chrA"], laws.code["chrB"]
     out = laws.density_of(np.array([a, a]), np.array([1000, 1000]), np.array([a, b]), np.array([5000, 5000]))
     assert out[0] == 5.0 and out[1] != 5.0          # chrA x chrA refined; chrA x chrB global
+
+
+def test_flat_density_is_memory_mapped_and_identical(stats_dir):
+    path = stats_dir / st.DENSITY_MAP
+    ref = ra.Laws(stats_dir, "full")
+    assert isinstance(ref.density, dict)
+    ra.flatten_density(path)
+    flat, index = ra.flat_density_paths(path)
+    assert flat.is_file() and index.is_file()
+    laws = ra.Laws(stats_dir, "full")
+    assert isinstance(laws.density, ra.FlatBlocks)
+    assert set(laws.density) == set(ref.density)
+    for k, v in ref.density.items():
+        assert isinstance(laws.density[k], np.memmap)
+        np.testing.assert_array_equal(laws.density[k], v)
+    rng = np.random.default_rng(0)
+    c1, c2 = rng.integers(0, 2, 500), rng.integers(0, 2, 500)
+    p1, p2 = rng.integers(1, 100_000, 500), rng.integers(1, 100_000, 500)
+    np.testing.assert_array_equal(laws.density_of(c1, p1, c2, p2), ref.density_of(c1, p1, c2, p2))
+    np.testing.assert_array_equal(laws.coarse(100_000), ref.coarse(100_000))
+    # a newer density file (statistics run again) makes the flat copy stale
+    import os
+    os.utime(path, (flat.stat().st_mtime + 10,) * 2)
+    assert isinstance(ra.Laws(stats_dir, "full").density, dict)
+
+
+def test_chunk_resume(tmp_path, monkeypatch):
+    out = tmp_path / "predicted_chunk0.pairs"
+    calls = []
+
+    def fake(job):
+        calls.append(job["out"])
+        Path(job["out"]).write_text("x\n")
+        return dict(ra._new_stats(), pairs=3, seconds=1.5)
+
+    monkeypatch.setattr(ra, "_reattribute_chunk", fake)
+    stats = ra.reattribute_chunk({"out": out})
+    assert ra.chunk_done(out) and stats["pairs"] == 3
+    out.write_text("x\n")                    # pairs file rewritten after the stats → not done
+    import os
+    os.utime(out, (ra.chunk_stats_path(out).stat().st_mtime + 10,) * 2)
+    assert not ra.chunk_done(out)
+
+
+def test_excluded_chromosome_never_receives_reads(stats_dir):
+    laws = ra.Laws(stats_dir, "full", exclude=["chrB"])
+    assert "chrB" not in laws.code and laws.excluded == {"chrB"} and laws.names == ["chrA", "chrB"]
+    # R1 identical on chrA and chrB (PAR-like), R2 on chrA far away → always chrA
+    r1 = [sam("p1", 0, "chrA", 10_000, 60), sam("p1", 256, "chrB", 10_000, 60)]
+    r2 = [sam("p1", 16, "chrA", 60_000, 60), sam("p1", 272, "chrB", 60_000, 60)]
+    for s in range(50):
+        out = io.StringIO()
+        ra.reattribute_stream(r1, r2, laws, out, np.random.default_rng(s))
+        f = out.getvalue().split("\t")
+        assert f[1] == "chrA" and f[3] == "chrA"
+    # a mate only on the excluded chromosome → unplaced
+    out = io.StringIO()
+    stats = ra.reattribute_stream(r1, [sam("p1", 16, "chrB", 60_000, 60)], laws, out, np.random.default_rng(0))
+    assert stats["unplaced"] == 1 and out.getvalue() == ""
+    # index-only path: a unique first alignment on the excluded chromosome gives no candidate
+    c, bins = ra.index_read_candidates(None, laws.code, b"A", b"I", ("chrB", 100, False, 60, True), 30, 1.0)
+    assert c == [] and bins is False

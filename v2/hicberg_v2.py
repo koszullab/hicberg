@@ -103,6 +103,25 @@ def n_workers(args, omics=False):
     return max(1, min(args.cpus, by_mem))
 
 
+def resolve_chroms(genome, spec):
+    """FASTA identifiers of a comma-separated list of identifiers or display names (chrY)."""
+    if not spec:
+        return []
+    import matrices_v2 as mx
+    names = mx.display_names(genome)
+    by_display = {v: k for k, v in names.items()}
+    out = []
+    for x in (t.strip() for t in spec.split(",") if t.strip()):
+        if x in names:
+            out.append(x)
+        elif x in by_display:
+            out.append(by_display[x])
+        else:
+            raise ValueError(f"--exclude_chroms: unknown sequence {x}")
+    log(f"Excluded from the re-attribution: {', '.join(f'{c} ({names[c]})' for c in out)}")
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description="HiCberg v2: rescue multi-mapping reads in Hi-C / Micro-C data.",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -172,6 +191,10 @@ def main():
                         "all the copies of their sequence as candidates instead of the arbitrary first "
                         "K found by bowtie2. 'auto' (default): built once in index/ (human: ~35 min, "
                         "~0.5 GB + the genome as codes on disk); a prefix of an existing index; 'none'")
+    p.add_argument("--exclude_chroms", default="",
+                   help="Chromosomes on which no ambiguous read is re-attributed, comma-separated FASTA "
+                        "identifiers or display names (chrY): e.g. chrY for a female sample, whose PAR "
+                        "reads would otherwise be split between chrX and a chrY absent from the cells")
     p.add_argument("--error_rate", type=float, default=0.01)
     p.add_argument("--as_delta", type=int, default=30)
     p.add_argument("--workers", type=int, default=0,
@@ -376,7 +399,8 @@ def main():
                        seed=args.seed, error_rate=args.error_rate,
                        repeat_index=None if omics else repeat_index_prefix(),
                        index_only=args.candidates == "index" and not omics,
-                       max_combinations=args.max_combinations)
+                       max_combinations=args.max_combinations,
+                       exclude_chroms=resolve_chroms(args.genome, args.exclude_chroms))
 
     # --- omics: signal tracks instead of the matrices ---
     if omics and run_stage("matrices", args):

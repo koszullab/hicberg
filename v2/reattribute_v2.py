@@ -35,10 +35,13 @@ CLI:
 """
 
 import argparse
+import gc
+import json
 import multiprocessing as mp
 import re
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -129,15 +132,81 @@ def alignment_weights(scores, lam):
 # Statistical laws (outputs of statistics_v2.py)
 # ---------------------------------------------------------------------------
 
+def flat_density_paths(path):
+    """Memory-mappable copy of a density file: density_map.flat.npy + density_map.flat_index.npy."""
+    path = Path(path)
+    return path.with_suffix(".flat.npy"), path.with_suffix(".flat_index.npy")
+
+
+def flatten_density(path):
+    """
+    Write the dict of density blocks of `path` (pickled, loaded whole by np.load) as one float32
+    array, memory-mappable, + an index {(chrom_a, chrom_b): (offset, shape)}. The workers then
+    share a single copy of the density through the page cache instead of loading one each
+    (human, 50 kb bins: 8 GB per worker). Skipped when the flat copy is newer than `path`.
+    """
+    path = Path(path)
+    flat, index_path = flat_density_paths(path)
+    if flat.is_file() and index_path.is_file() \
+            and min(flat.stat().st_mtime, index_path.stat().st_mtime) >= path.stat().st_mtime:
+        return flat, index_path
+    maps = np.load(path, allow_pickle=True).item()
+    tmp = flat.with_name(flat.stem + ".tmp.npy")
+    arr = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.float32,
+                                    shape=(sum(v.size for v in maps.values()),))
+    index, off = {}, 0
+    for k in list(maps):
+        v = maps.pop(k)                                   # freed block by block
+        arr[off:off + v.size] = np.asarray(v, dtype=np.float32).ravel()
+        index[k] = (off, tuple(v.shape))
+        off += v.size
+    arr.flush()
+    del arr, maps
+    np.save(index_path, index)
+    tmp.replace(flat)                                     # complete copy only
+    return flat, index_path
+
+
+class FlatBlocks(Mapping):
+    """Read-only dict of density blocks backed by the memory-mapped flat copy (flatten_density)."""
+
+    def __init__(self, path):
+        flat, index_path = flat_density_paths(path)
+        self._arr = np.load(flat, mmap_mode="r")
+        self._index = np.load(index_path, allow_pickle=True).item()
+
+    def __getitem__(self, key):
+        off, shape = self._index[key]
+        return self._arr[off:off + int(np.prod(shape))].reshape(shape)
+
+    def __iter__(self):
+        return iter(self._index)
+
+    def __len__(self):
+        return len(self._index)
+
+
+def load_density(path):
+    """Density blocks: memory-mapped flat copy if present (and up to date), else the dict."""
+    flat, index_path = flat_density_paths(path)
+    if flat.is_file() and index_path.is_file() and flat.stat().st_mtime >= Path(path).stat().st_mtime:
+        return FlatBlocks(path)
+    return np.load(path, allow_pickle=True).item()
+
+
 class Laws:
     """Laws of a statistics folder, stored as flat arrays for vectorised lookups."""
 
-    def __init__(self, stats_dir, mode, circular=None, bin_size=2000):
+    def __init__(self, stats_dir, mode, circular=None, bin_size=2000, exclude=()):
         d = Path(stats_dir)
         load = lambda name: np.load(d / name, allow_pickle=True).item()
         sizes = load(st.CHROM_SIZES)
         self.names = list(sizes)
-        self.code = {c: i for i, c in enumerate(self.names)}
+        # excluded chromosomes (e.g. chrY of a female sample): absent from `code`, so that no
+        # candidate is placed on them (the candidate filters test `chrom in laws.code`); their
+        # rows stay in the arrays (indices unchanged)
+        self.excluded = set(exclude) & set(self.names)
+        self.code = {c: i for i, c in enumerate(self.names) if c not in self.excluded}
         self.sizes = np.array([sizes[c] for c in self.names], dtype=np.int64)
         self.bin_size = bin_size
         self.mode = mode
@@ -153,8 +222,8 @@ class Laws:
         self.law = np.zeros((len(self.names), 4, len(self.xs_glob)))
         for t, name in enumerate((st.UNCUTS, st.CIRCLES, st.WEIRDS)):
             law = load(name)
-            for c in self.names:
-                self.law[self.code[c], t, :len(law[c])] = law[c]
+            for k, c in enumerate(self.names):
+                self.law[k, t, :len(law[c])] = law[c]
         self.law[:, 3] = (self.law[:, 0] + self.law[:, 1] + 2 * self.law[:, 2]) / 4
         self.index_bin = 0                                  # set by set_index_bin()
         trans = load(st.TRANS_PS)
@@ -166,7 +235,7 @@ class Laws:
             self.cov_off = np.concatenate([[0], np.cumsum(self.cov_n)[:-1]])
             self.cov = np.concatenate([np.asarray(cov[c], dtype=np.float64) for c in self.names])
         if mode == "full":
-            self.density = load(st.DENSITY_MAP)
+            self.density = load_density(d / st.DENSITY_MAP)
             self.dens_n = np.array([self.density[(c, c)].shape[0] for c in self.names])
             # the density may be binned more coarsely than the coverage (large genomes)
             self.dens_bin = int(np.load(d / st.DENSITY_BIN)) if (d / st.DENSITY_BIN).is_file() \
@@ -174,7 +243,7 @@ class Laws:
             # refined density of the small, densely covered molecules (statistics_v2)
             self.fine = np.zeros(len(self.names), dtype=bool)
             if (d / st.DENSITY_FINE_MAP).is_file():
-                self.density_fine = load(st.DENSITY_FINE_MAP)
+                self.density_fine = load_density(d / st.DENSITY_FINE_MAP)
                 self.dens_bin_fine = int(np.load(d / st.DENSITY_FINE_BIN))
                 fine_names = {a for a, _ in self.density_fine}
                 self.fine = np.array([c in fine_names for c in self.names])
@@ -667,11 +736,11 @@ def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, ma
     stats = stats if stats is not None else _new_stats()
     chrom, pos, rev, _, unique = hit
     if unique:
-        return [(chrom, pos, int(rev), 1.0, -1)], False
+        return ([(chrom, pos, int(rev), 1.0, -1)] if chrom in codes else []), False
     chroms, starts, w = repeat_index.candidates(seq, min_fraction)
     if len(chroms) == 0:
         stats["index_fallback"] += 1
-        return [(chrom, pos, int(rev), 1.0, -1)], False
+        return ([(chrom, pos, int(rev), 1.0, -1)] if chrom in codes else []), False
     stats["index_reads"] += 1
     B = repeat_index.bin_size
     if len(chroms) + 1 > max_scored:
@@ -692,7 +761,7 @@ def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, ma
                 found[(c, p, r)] = sc
     if not found:
         stats["index_fallback"] += 1
-        return [(chrom, pos, int(rev), 1.0, -1)], False
+        return ([(chrom, pos, int(rev), 1.0, -1)] if chrom in codes else []), False
     best = max(found.values())
     keep = [(k, v) for k, v in found.items() if v >= best - as_delta]
     wts = alignment_weights([v for _, v in keep], lam)
@@ -735,7 +804,7 @@ def reattribute_index_stream(fastq1, fastq2, hits, laws, out_fh, rng, repeat_ind
             if not (n1 == n2 == nh):
                 raise ValueError(f"R1 / R2 / hits out of sync: {n1} {n2} {nh}")
             stats["pairs"] += 1
-            if h1[0] not in laws.code or h2[0] not in laws.code:
+            if not ({h1[0], h2[0]} <= set(laws.code) | laws.excluded):     # unknown chromosome
                 stats["unplaced"] += 1
                 continue
             (c1, x1), (c2, x2) = candidates(s1, u1, h1), candidates(s2, u2, h2)
@@ -772,14 +841,34 @@ def merge_pairs(unrescued, predicted, out_path, chrom_sizes):
     return n
 
 
+def chunk_stats_path(out):
+    """Statistics of a finished chunk, written once its pairs file is complete (resume)."""
+    return Path(str(out) + ".stats.json")
+
+
+def chunk_done(out):
+    """A chunk is finished when its stats file exists and is not older than its pairs file."""
+    s = chunk_stats_path(out)
+    return Path(out).is_file() and s.is_file() and s.stat().st_mtime >= Path(out).stat().st_mtime
+
+
 def reattribute_chunk(job):
+    """Worker: one group2 chunk (_reattribute_chunk), then its stats file (resume)."""
+    stats = _reattribute_chunk(job)
+    chunk_stats_path(job["out"]).write_text(json.dumps({k: int(v) if k != "seconds" else float(v)
+                                                        for k, v in stats.items()}))
+    return stats
+
+
+def _reattribute_chunk(job):
     """
-    Worker: one group2 chunk. job = dict(fastq1, fastq2 | sam1, sam2, out, stats_dir,
+    One group2 chunk. job = dict(fastq1, fastq2 | sam1, sam2, out, stats_dir,
     mode, circular, bin_size, index, max_alignments, threads, as_delta, seed).
     Runs bowtie2 on both FASTQ files (stdout read as a stream), or reads SAM files.
     """
     t0 = time.time()
-    laws = Laws(job["stats_dir"], job["mode"], job.get("circular"), job["bin_size"])
+    laws = Laws(job["stats_dir"], job["mode"], job.get("circular"), job["bin_size"],
+                job.get("exclude", ()))
     rng = np.random.default_rng(job["seed"])
     if job.get("index_only"):
         from repeat_index_v2 import RepeatIndex
@@ -830,7 +919,8 @@ def reattribute_chunk(job):
 def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 max_alignments="100", as_delta=30, n_workers=1, threads=1, circular=None,
                 bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01, max_combinations=0,
-                near=100_000, n_samples=256, repeat_index=None, index_only=False):
+                near=100_000, n_samples=256, repeat_index=None, index_only=False,
+                exclude_chroms=()):
     """
     Re-attribute all the group2 chunks of classifier_dir (in parallel, one
     process per chunk) and write output_dir/predicted.pairs.
@@ -852,7 +942,7 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta,
                 error_rate=error_rate, max_combinations=max_combinations, near=near,
                 n_samples=n_samples, repeat_index=str(repeat_index) if repeat_index else None,
-                index_only=index_only)
+                index_only=index_only, exclude=list(exclude_chroms))
     jobs = []
     if sam_pairs:
         for i, (s1, s2) in enumerate(sam_pairs):
@@ -874,11 +964,27 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
             jobs.append(dict(base, fastq1=str(f1), fastq2=str(f2), hits=str(hits), seed=seed + i,
                              out=output_dir / f"predicted_chunk{i}.pairs"))
 
-    if n_workers > 1 and len(jobs) > 1:
-        with mp.Pool(min(n_workers, len(jobs))) as pool:
-            results = pool.map(reattribute_chunk, jobs)
+    # one memory-mapped copy of the density, shared by all the workers (page cache), instead of
+    # one unpickled copy per worker (human, 50 kb: 8 GB each → OOM with 18 workers)
+    if mode == "full":
+        for name in (st.DENSITY_MAP, st.DENSITY_FINE_MAP):
+            if (Path(stats_dir) / name).is_file():
+                flatten_density(Path(stats_dir) / name)
+        gc.collect()
+
+    # resume: chunks finished by a previous run (stats file written) are not drawn again
+    done = {i for i, j in enumerate(jobs) if chunk_done(j["out"])}
+    if done:
+        print(f"Resume: {len(done)} chunk(s) already re-attributed, {len(jobs) - len(done)} to do")
+    todo = [j for i, j in enumerate(jobs) if i not in done]
+    if n_workers > 1 and len(todo) > 1:
+        with mp.Pool(min(n_workers, len(todo))) as pool:
+            new = pool.map(reattribute_chunk, todo)
     else:
-        results = [reattribute_chunk(j) for j in jobs]
+        new = [reattribute_chunk(j) for j in todo]
+    new = iter(new)
+    results = [json.loads(chunk_stats_path(j["out"]).read_text()) if i in done else next(new)
+               for i, j in enumerate(jobs)]
 
     sizes = np.load(Path(stats_dir) / st.CHROM_SIZES, allow_pickle=True).item()
     with open(output_dir / "predicted.pairs", "w") as out:
@@ -888,6 +994,7 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 for line in fh:
                     out.write(line)
             Path(j["out"]).unlink()
+            chunk_stats_path(j["out"]).unlink(missing_ok=True)
 
     unrescued = Path(classifier_dir) / "unrescued.pairs" if classifier_dir else None
     if unrescued is not None and unrescued.is_file():
@@ -914,7 +1021,8 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
         cand_line,
         f"pairs                 : {total['pairs']}",
         f"placed                : {total['placed']}",
-        f"unplaced              : {total['unplaced']} (a mate without alignment)",
+        f"unplaced              : {total['unplaced']} (a mate without candidate"
+        + (f" outside the excluded {', '.join(sorted(exclude_chroms))}" if exclude_chroms else "") + ")",
         f"candidates per read   : R1 {total['cand1'] / p:.2f}, R2 {total['cand2'] / p:.2f}",
         f"combinations per pair : {total['combinations'] / p:.2f} "
         f"(evaluated {total['evaluated'] / p:.2f})",
