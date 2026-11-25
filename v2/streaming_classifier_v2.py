@@ -14,6 +14,7 @@ Outputs:
   - group2_1_chunk{i}.fastq  : group2 R1 split by n_cpus
   - group2_2_chunk{i}.fastq  : group2 R2 split by n_cpus
   - group2_hits_chunk{i}.tsv : best alignment of each group2 read, same order as the FASTQ
+                              (per mate: chrom, 5' position, strand, AS, unique, NM)
                                (name, then for R1 and R2: chrom, 5' position, strand, AS,
                                unique 0/1), used by the index-only re-attribution
   - chimeric_names.txt       : read names of chimeric reads
@@ -46,46 +47,40 @@ def parse_cigar(cigar_str):
 
 def get_largest_M_chunk(cigar_tuples, sequence, qualities, min_bp=30):
     """
-    Extract the largest M block from a chimeric read.
-    Returns (seq, quals) of the largest M block, or (None, None) if none >= min_bp.
+    Aligned part of a chimeric read: the query between the leading and trailing soft-clips
+    (insertions and deletions inside it kept: an indel is not a ligation junction; before
+    2026-11-24 only the longest M block was kept, so 60M1I89M lost 61 bp).
+    Returns (seq, quals), or (None, None) if fewer than min_bp aligned (M) bases.
     """
-    query_pos = 0
-    best_seq   = None
-    best_quals = None
-    best_len   = 0
-
-    for op, length in cigar_tuples:
-        if op == 'M':
-            if length > best_len:
-                best_len   = length
-                best_seq   = sequence[query_pos:query_pos + length]
-                best_quals = qualities[query_pos:query_pos + length]
-            query_pos += length
-        elif op in ('S', 'I'):
-            query_pos += length
-        # D, N, H do not consume query
-
-    if best_len < min_bp:
+    if not cigar_tuples:
         return None, None
-
-    return best_seq, best_quals
+    start = cigar_tuples[0][1] if cigar_tuples[0][0] == 'S' else 0
+    end_clip = cigar_tuples[-1][1] if len(cigar_tuples) > 1 and cigar_tuples[-1][0] == 'S' else 0
+    end = len(sequence) - end_clip
+    if sum(l for op, l in cigar_tuples if op == 'M') < min_bp or end <= start:
+        return None, None
+    return sequence[start:end], qualities[start:end]
 
 
 def is_chimeric(cigar_tuples, query_length, threshold_clip=30, min_aligned_frac=0.5):
     """
-    A read is chimeric if it has a significant 3' soft-clip
-    OR if its aligned fraction is below min_aligned_frac.
+    A read is chimeric if a soft-clip at EITHER end of the alignment is longer than
+    threshold_clip, OR if its aligned fraction is below min_aligned_frac.
+    Both ends: the CIGAR follows the reference strand (its last operation is the 3' end of a
+    forward read but the 5' end of a reverse one), and the ligation junction can be on either
+    side of the aligned piece (local mode keeps the longer one). Before 2026-11-24 only the last
+    operation was tested (human, clip > 30 bp: read 3' end 16 %, 5' end 11 % on both strands;
+    tested 16 % of the forward reads, 11 % of the reverse ones).
     """
     if not cigar_tuples:
         return False
 
-    aligned_bp   = sum(l for op, l in cigar_tuples if op == 'M')
-    last_op, last_len = cigar_tuples[-1]
+    aligned_bp = sum(l for op, l in cigar_tuples if op == 'M')
+    clipped = any(op == 'S' and l > threshold_clip
+                  for op, l in (cigar_tuples[0], cigar_tuples[-1]))
+    low_frac = (aligned_bp / query_length) < min_aligned_frac
 
-    has_3prime_clip = (last_op == 'S' and last_len > threshold_clip)
-    low_frac        = (aligned_bp / query_length) < min_aligned_frac
-
-    return has_3prime_clip or low_frac
+    return clipped or low_frac
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +222,127 @@ def is_unique(fields, min_mapq=30):
     return min_mapq is not None and int(fields[4]) >= min_mapq
 
 
+_NM_TAG = re.compile(r"(?:^|\t)NM:i:(\d+)")
+
+
+class UniqueVerifier:
+    """
+    Second look at the reads unique by MAPQ only (XS present, MAPQ >= min_mapq) that align
+    poorly (NM >= min_nm): in the large satellites bowtie2 does not extend all the seeds of a
+    read and may report a diverged copy whose seeds are rare, with a high MAPQ, while the true
+    copy was never examined (human CHM13 Hi-C: chr16 52.18 Mb, 3,151 reads, NM 3.5; chr14 8.27 Mb,
+    16,801 reads, NM 5.0; for 47 % of such reads the repeat index finds a better alignment
+    elsewhere). Genome-wide this concerns ~4 % of the unique-by-MAPQ reads, 0.2 % of which have a
+    better alignment elsewhere. The read's repeated minimizers give its candidate bins (repeat
+    index); if one of them (other than the bin of its alignment) scores >= AS - tol (score_bin:
+    ungapped local score, bowtie2 scale; tol 6 = one mismatch), the read is ambiguous.
+    """
+
+    def __init__(self, repeat_index, min_nm=4, max_bins=10, tol=6, min_fraction=0.3):
+        from repeat_index_v2 import RepeatIndex
+        self.ri = RepeatIndex(repeat_index) if not hasattr(repeat_index, "score_bin") else repeat_index
+        self.min_nm, self.max_bins, self.tol, self.min_fraction = min_nm, max_bins, tol, min_fraction
+        self.checked = self.requalified = 0
+
+    def __call__(self, fields):
+        """True if the read stays unique."""
+        m = _NM_TAG.search(fields[11])
+        if m is None or int(m.group(1)) < self.min_nm:
+            return True
+        a = _AS_TAG.search(fields[11])
+        if a is None:
+            return True
+        self.checked += 1
+        seq, qual = fields[9].encode(), fields[10].encode()
+        chroms, starts, w = self.ri.candidates(seq, self.min_fraction)
+        if len(chroms) == 0:
+            return True
+        B = self.ri.bin_size
+        own_c, own_p = fields[2], int(fields[3])
+        need = int(a.group(1)) - self.tol
+        for k in np.argsort(-np.asarray(w), kind="stable")[:self.max_bins]:
+            c, b = chroms[k], int(starts[k])
+            if c == own_c and b - B <= own_p < b + 2 * B:   # its own bin (or a neighbour)
+                continue
+            sc, _ = self.ri.score_bin(seq, c, b, qual)
+            if sc is not None and sc >= need:
+                self.requalified += 1
+                return False
+        return True
+
+
+def verified_unique(fields, min_mapq=30, verifier=None, requalified=None):
+    """is_unique, then for the reads unique by MAPQ only: not in `requalified` (names found by
+    find_requalified, the parallel pre-pass), or accepted by the verifier (UniqueVerifier)."""
+    if not has_xs_tag(fields[11]):
+        return True
+    if min_mapq is None or int(fields[4]) < min_mapq:
+        return False
+    if requalified is not None:
+        return fields[0] not in requalified
+    return True if verifier is None else verifier(fields)
+
+
+_WORKER_VERIFIER = None
+
+
+def _init_verifier(repeat_index, min_nm, max_bins):
+    global _WORKER_VERIFIER
+    _WORKER_VERIFIER = UniqueVerifier(repeat_index, min_nm=min_nm, max_bins=max_bins)
+
+
+def _verify_batch(lines):
+    """Worker: names of the reads of a batch that become ambiguous, and the number checked."""
+    out = []
+    for line in lines:
+        f = split_sam(line)
+        if f is not None and not _WORKER_VERIFIER(f):
+            out.append(f[0])
+    return out, len(lines)
+
+
+def find_requalified(sam_path, repeat_index, n_workers, min_mapq=30, min_nm=4, max_bins=10,
+                     batch=500):
+    """
+    Parallel pre-pass of UniqueVerifier over one SAM file: the primary alignments unique by MAPQ
+    only (XS present, MAPQ >= min_mapq) with NM >= min_nm are selected by cheap string tests and
+    checked by a pool of n_workers processes (the repeat index is memory-mapped, shared).
+    Human (2 x 242 M reads, ~2 % of the alignments checked): ~1 h with 12 workers, vs ~5 h in the
+    single-process classifier. Returns (set of read names to treat as ambiguous, number checked).
+    """
+    import multiprocessing as mp
+
+    def batches():
+        cur = []
+        with open(sam_path) as fh:
+            for line in fh:
+                if line[0] == "@" or "\tXS:i:" not in line:
+                    continue
+                f = line.split("\t", 5)
+                if int(f[1]) & 2308 or int(f[4]) < min_mapq:         # unmapped / secondary / supplementary
+                    continue
+                m = _NM_TAG.search(line)
+                if m is None or int(m.group(1)) < min_nm:
+                    continue
+                cur.append(line)
+                if len(cur) >= batch:
+                    yield cur
+                    cur = []
+        if cur:
+            yield cur
+
+    names, checked = set(), 0
+    with mp.Pool(n_workers, initializer=_init_verifier,
+                 initargs=(str(repeat_index), min_nm, max_bins)) as pool:
+        for out, n in pool.imap_unordered(_verify_batch, batches(), chunksize=1):
+            names.update(out)
+            checked += n
+    return names, checked
+
+
+
+
+
 def reference_length(cigar_str):
     """Number of reference bases covered by the alignment (M/D/N/=/X)."""
     if cigar_str[:-1].isdigit() and cigar_str[-1] == 'M':   # e.g. '36M'
@@ -349,7 +465,8 @@ def write_fastq_record(fh, query_name, sequence, qualities):
 
 def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
              threshold_clip=30, min_aligned_frac=0.5, coverage_all_reads=False,
-             dedup=True, min_mapq=30, dedup_tol=3, min_insert=20):
+             dedup=True, min_mapq=30, dedup_tol=3, min_insert=20, verify_unique=None,
+             verify_workers=1, exclude_chroms=()):
     """
     coverage_all_reads: also count the 5' positions of all aligned reads
     (coverage_all_reads.npz, ~+25% time), used by statistics_v2.py
@@ -371,6 +488,12 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
     unmapped (group0): such reads align uniquely to adapter pieces left in some
     assemblies (mosquito chr3 35,436,681: 1,246 false contacts with the whole
     genome). Longer inserts are kept (local alignment clips the adapter). 0 = off.
+    verify_unique: repeat index prefix (or a RepeatIndex): the reads unique by MAPQ only but
+    poorly aligned are checked against the other copies (UniqueVerifier); None = off (default:
+    it only fixes 2 alignment attractors in the human genome). verify_workers > 1: parallel
+    pre-pass find_requalified on both SAM files (human ~1 h with 12 workers, vs ~5 h inline).
+    exclude_chroms: pairs with a read aligned to one of these sequences are dropped (counted in
+    group0, 'excluded'): e.g. chrY of a female sample.
     dedup_tol: then, the unique pairs are also deduplicated on their
     coordinates with this tolerance (dedup_coordinates, as pairtools dedup);
     < 0 = off.
@@ -414,11 +537,25 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         'dup_group1':     0,
         'dup_group2':     0,
         'adapter':        0,
+        'excluded':       0,
         'chunk_index':    0,   # round-robin counter for splitting
     }
     seen = set()             # hashes of the (R1, R2) sequences of the pairs kept
 
     cov_all = AllReadsCoverage(sam_chrom_sizes(sam1_path)) if coverage_all_reads else None
+    excl = set(exclude_chroms or ())
+    verifier = req1 = req2 = None
+    n_checked = n_requalified = 0
+    if verify_unique is not None and verify_workers > 1 and min_mapq is not None:
+        import time as _t
+        t0 = _t.time()
+        req1, c1 = find_requalified(sam1_path, verify_unique, verify_workers, min_mapq)
+        req2, c2 = find_requalified(sam2_path, verify_unique, verify_workers, min_mapq)
+        n_checked, n_requalified = c1 + c2, len(req1) + len(req2)
+        print(f"  unique-by-MAPQ reads checked against the repeat index: {n_checked:,}, "
+              f"{n_requalified:,} ambiguous ({_t.time() - t0:.0f} s, {verify_workers} workers)", flush=True)
+    elif verify_unique is not None:
+        verifier = UniqueVerifier(verify_unique)
 
     # --- Stream both SAM files simultaneously ---
     with open(sam1_path) as fh1, open(sam2_path) as fh2:
@@ -454,6 +591,13 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                 stats['group0'] += 1
                 continue
 
+            # pair touching an excluded sequence (e.g. chrY of a female sample): dropped
+            if excl and (f1[2] in excl or f2[2] in excl):
+                f_group0.write(f1[0] + '\n')
+                stats['group0'] += 1
+                stats['excluded'] += 1
+                continue
+
             # adapter read-through: insert too short to be placed → unmapped
             if min_insert:
                 s1 = f1[9].translate(_REVCOMP)[::-1] if flag1 & 16 else f1[9]
@@ -464,7 +608,9 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
                     stats['adapter'] += 1
                     continue
 
-            unique = is_unique(f1, min_mapq) and is_unique(f2, min_mapq)
+            u1 = verified_unique(f1, min_mapq, verifier, req1)
+            u2 = verified_unique(f2, min_mapq, verifier, req2)
+            unique = u1 and u2
 
             # ----------------------------------------------------------------
             # PCR duplicates: identical (R1, R2) sequences, sequenced orientation;
@@ -550,11 +696,12 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
             write_fastq_record(g2_r1_files[chunk_idx], r1['query_name'], seq1, qual1)
             write_fastq_record(g2_r2_files[chunk_idx], r2['query_name'], seq2, qual2)
             hits = []
-            for f in (f1, f2):
+            for f, uq in ((f1, u1), (f2, u2)):
                 rev = bool(int(f[1]) & 16)
                 m = _AS_TAG.search(f[11])
+                nm = _NM_TAG.search(f[11])
                 hits.append(f"{f[2]}\t{fast_outer_5prime(f, rev)}\t{'-' if rev else '+'}\t"
-                            f"{m.group(1) if m else 0}\t{int(is_unique(f, min_mapq))}")
+                            f"{m.group(1) if m else 0}\t{int(uq)}\t{nm.group(1) if nm else 0}")
             g2_hits[chunk_idx].write(f"{r1['query_name']}\t" + "\t".join(hits) + "\n")
 
     if cov_all is not None:
@@ -593,8 +740,17 @@ def classify(sam1_path, sam2_path, output_dir, n_cpus, min_chunk_bp=30,
         if min_insert:
             fs.write(f"adapter     : {stats['adapter']}  (a read with < {min_insert} bp before the "
                      f"Illumina adapter: counted in group0)\n")
+        if exclude_chroms:
+            fs.write(f"excluded    : {stats['excluded']}  (a read aligned to {', '.join(sorted(excl))}: "
+                     f"counted in group0)\n")
         fs.write(f"chimeric_r1 : {stats['chimeric_r1']}\n")
         fs.write(f"chimeric_r2 : {stats['chimeric_r2']}\n")
+        if verifier is not None:
+            n_checked, n_requalified = verifier.checked, verifier.requalified
+        if verify_unique is not None:
+            fs.write(f"unique by MAPQ, NM >= 4, checked against the repeat index : "
+                     f"{n_checked} ; requalified ambiguous (a copy as good elsewhere) : "
+                     f"{n_requalified}\n")
 
     # Print stats to stdout
     print("\n=== Classification stats ===")
@@ -698,6 +854,13 @@ def main():
         help="A read with an XS tag but MAPQ >= this value is unique (default=30; "
              "-1 = XS criterion only)"
     )
+    parser.add_argument("--exclude_chroms", default="",
+                        help="Comma-separated sequences: pairs with a read aligned to them are dropped")
+    parser.add_argument("--verify_workers", type=int, default=1,
+                        help="Processes of the --verify_unique check (> 1: parallel pre-pass)")
+    parser.add_argument("--verify_unique", default=None,
+                        help="Repeat index prefix (repeat_index_v2.py): reads unique by MAPQ only but "
+                             "poorly aligned (NM >= 4) become ambiguous if a copy as good exists elsewhere")
     args = parser.parse_args()
 
     classify(
@@ -710,6 +873,9 @@ def main():
         min_aligned_frac  = args.min_aligned_frac,
         coverage_all_reads = args.coverage_all_reads,
         min_mapq          = None if args.min_mapq < 0 else args.min_mapq,
+        verify_unique     = args.verify_unique,
+        verify_workers    = args.verify_workers,
+        exclude_chroms    = [x for x in args.exclude_chroms.split(",") if x],
     )
 
 

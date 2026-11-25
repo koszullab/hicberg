@@ -304,6 +304,11 @@ def _kmer_codes(codes, k):
     return v
 
 
+_INV = np.full(256, ord("N"), np.uint8)              # codes 0-3 -> ACGT, 4 -> N
+for _b in b"ACGT":
+    _INV[LUT[_b]] = _b
+
+
 class RepeatIndex:
     """
     Repeat index + genome codes, as used by the re-attribution:
@@ -332,6 +337,21 @@ class RepeatIndex:
         c, start = bin_to_chrom(self.idx, bins)
         return [self.chroms[i] for i in c], start, w
 
+    def reference_segment(self, chrom, pos5, is_reverse, length):
+        """Genome sequence (bytes, forward strand) of `length` bp at a read's first alignment,
+        5' end pos5 with the conventions of the SAM parsing (forward: 1-based start; reverse:
+        0-based exclusive end); b"" outside the sequence. Looked up in the index for the reads
+        whose own sequence has no repeated minimizer (an error in a short read kills every k-mer):
+        the reference at the first alignment carries the copies (mosquito mito / chr3 NUMT)."""
+        if chrom not in self.layout or length <= 0:
+            return b""
+        off, n = self.layout[chrom]
+        a = pos5 - length if is_reverse else pos5 - 1
+        a, b = max(0, a), min(n, a + length)
+        if b - a < self.k:
+            return b""
+        return bytes(_INV[np.asarray(self.genome[off + a: off + b])])
+
     def place(self, seq, chrom, bin_start, rng, quals=None):
         """One exact placement of the read in the bin, drawn among the tied best ones (see
         place_choices). Returns (5' position, is_reverse) or None."""
@@ -343,7 +363,7 @@ class RepeatIndex:
         copies: several ties), [] if no anchor."""
         return self.score_bin(seq, chrom, bin_start, quals)[1]
 
-    def score_bin(self, seq, chrom, bin_start, quals=None, min_votes=0.5):
+    def score_bin(self, seq, chrom, bin_start, quals=None, min_votes=0.5, anchor=None):
         """
         Best local alignment of the read in [bin_start, bin_start + bin_size) (+ one read
         length on each side), without indels:
@@ -355,6 +375,9 @@ class RepeatIndex:
           3. the best-scoring diagonals win (tandem copies: several ties).
         Returns (score, [(5' position with the conventions of the SAM parsing, is_reverse)]);
         (None, []) if no anchor. Score ~ bowtie2 AS of an ungapped alignment.
+        anchor: another sequence of the same length (the reference at the read's first alignment)
+        whose k-mers give the diagonals, the read itself being scored on them (a short read with
+        one error in the middle has no exact anchor_k-mer).
         """
         off, n = self.layout[chrom]
         L = len(seq)
@@ -364,6 +387,11 @@ class RepeatIndex:
         ref = _kmer_codes(ref_codes, self.anchor_k)
         r = LUT[np.frombuffer(seq, np.uint8)]
         rc = np.where(r < 4, 3 - r, 4)[::-1]
+        if anchor is not None and len(anchor) == L:
+            va = LUT[np.frombuffer(anchor, np.uint8)]
+            vote_seqs = ((False, va), (True, np.where(va < 4, 3 - va, 4)[::-1]))
+        else:
+            vote_seqs = ((False, r), (True, rc))
         if quals is None:
             pen = np.full(L, 6)
         else:
@@ -372,7 +400,7 @@ class RepeatIndex:
         order = np.argsort(ref, kind="stable")
         sref = ref[order]
         cand = []                                       # (votes, diagonal, is_rev)
-        for is_rev, qc in ((False, r), (True, rc)):
+        for is_rev, qc in vote_seqs:
             v = _kmer_codes(qc, self.anchor_k)
             qi = np.flatnonzero(v >= 0)
             if len(qi) == 0:

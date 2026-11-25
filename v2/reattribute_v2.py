@@ -240,6 +240,9 @@ class Laws:
             # the density may be binned more coarsely than the coverage (large genomes)
             self.dens_bin = int(np.load(d / st.DENSITY_BIN)) if (d / st.DENSITY_BIN).is_file() \
                 else bin_size
+            # cis pairs closer than this were left out of the density: density 1 (P(s) only)
+            self.dens_min = int(np.load(d / st.DENSITY_MIN_DIST)) \
+                if (d / st.DENSITY_MIN_DIST).is_file() else 0
             # refined density of the small, densely covered molecules (statistics_v2)
             self.fine = np.zeros(len(self.names), dtype=bool)
             if (d / st.DENSITY_FINE_MAP).is_file():
@@ -290,6 +293,23 @@ class Laws:
         return self.cov[self.cov_off[c] + np.maximum(b, 0)]
 
     def density_of(self, c1, p1, c2, p2):
+        """Density of each combination (density_any); below the density's minimum distance
+        (statistics_v2 density_min_distance: those pairs were left out of the density, P(s) by
+        orientation describes them) the density is held constant at its diagonal value (the
+        density of the first position's own bin): no step at that distance. A density of 1
+        there made a step against the interpolated value of the satellite arrays (0.5-0.9) and
+        pulled their contacts below 5 kb (known-truth test)."""
+        out = self.density_any(c1, p1, c2, p2)
+        if getattr(self, "dens_min", 0) > 0:
+            cis = np.flatnonzero(c1 == c2)
+            if len(cis):
+                c = c1[cis]
+                near = cis[st.cis_distance(p1[cis], p2[cis], self.sizes[c], self.circular[c]) < self.dens_min]
+                if len(near):
+                    out[near] = self.density_any(c1[near], p1[near], c1[near], p1[near])
+        return out
+
+    def density_any(self, c1, p1, c2, p2):
         """Density of each combination; blocks are stored for chromosome a <= b. Pairs of
         molecules that have a refined density map (both in it) use it."""
         both = self.fine[c1] & self.fine[c2]
@@ -639,7 +659,8 @@ def _draw_pairs(pairs, laws, out_fh, rng, stats, repeat_index=None, batch_combin
 def _new_stats():
     return dict(pairs=0, placed=0, unplaced=0, combinations=0, cand1=0, cand2=0, intra=0,
                 sampled=0, evaluated=0, index_reads=0, index_bins=0, index_unplaced=0,
-                index_scored=0, index_fallback=0)
+                index_scored=0, index_fallback=0, unplaceable_fallback=0, unplaceable_unique=0,
+                index_ref_lookup=0, unique_requalified=0)
 
 
 def reattribute_stream(lines1, lines2, laws, out_fh, rng, as_delta=30, error_rate=0.01,
@@ -718,27 +739,66 @@ def read_fastq(path):
 
 def read_hits(path):
     """Yield (name, hit R1, hit R2) of a group2_hits_chunk file: hit = (chrom, 5' position,
-    is_reverse, AS, unique)."""
+    is_reverse, AS, unique, NM). Files of 5 fields per mate (before 2026-11-25, no NM): NM = -1."""
     with open(path) as fh:
         for line in fh:
             f = line.rstrip("\n").split("\t")
-            yield f[0], (f[1], int(f[2]), f[3] == "-", int(f[4]), f[5] == "1"), \
-                (f[6], int(f[7]), f[8] == "-", int(f[9]), f[10] == "1")
+            k = (len(f) - 1) // 2
+            h1, h2 = ((f[o], int(f[o + 1]), f[o + 2] == "-", int(f[o + 3]), f[o + 4] == "1",
+                       int(f[o + 5]) if k >= 6 else -1) for o in (1, 1 + k))
+            yield f[0], h1, h2
+
+
+_COMP = bytes.maketrans(b"ACGTN", b"TGCAN")
 
 
 def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, max_scored=50,
-                          min_fraction=0.3, stats=None):
+                          min_fraction=0.3, stats=None, max_fallback_nm=None, requalify_nm=None):
     """
     Candidates of one group2 read for the index-only re-attribution (see
     reattribute_index_stream). hit = first alignment (chrom, 5' position, is_reverse, AS,
-    unique); codes = chromosomes known to the laws. Returns (candidates, are_bins).
+    unique[, NM]); codes = chromosomes known to the laws. Returns (candidates, are_bins).
+    max_fallback_nm: a read without any index candidate (ambiguous, or unique) whose first
+    alignment has NM >= max_fallback_nm is not placeable (no candidate: the pair is unplaced):
+    degraded reads of the satellites (errors in low-complexity arrays, chimeras) match nothing
+    exactly and their first alignments converged on a few loci (piles chr16:52.18 Mb,
+    chr14:8.27 Mb, 2026-11-25). None = off; needs the NM of the hits (classification of
+    2026-11-25 or later; -1 = unknown, kept).
     """
     stats = stats if stats is not None else _new_stats()
-    chrom, pos, rev, _, unique = hit
+    anchor = None
+    chrom, pos, rev, _, unique = hit[:5]
+    nm = hit[5] if len(hit) > 5 else -1
+    degraded = max_fallback_nm is not None and nm >= max_fallback_nm
+    if unique and requalify_nm is not None and nm >= requalify_nm:
+        # unique by MAPQ but a poor first alignment (NM >= requalify_nm): degraded satellite reads matched
+        # a singular array edge best by a small margin and seeded coverage piles (2026-11-25); treated
+        # as an ambiguous read: its copies (index, through the read or the reference at its first
+        # alignment) compete with its first alignment through the alignment weights
+        unique = False
+        stats["unique_requalified"] += 1
     if unique:
+        if degraded and len(repeat_index.candidates(seq, min_fraction)[0]) == 0:
+            stats["unplaceable_unique"] += 1
+            return [], False
         return ([(chrom, pos, int(rev), 1.0, -1)] if chrom in codes else []), False
     chroms, starts, w = repeat_index.candidates(seq, min_fraction)
+    if len(chroms) == 0 and hasattr(repeat_index, "reference_segment"):
+        # no repeated minimizer in the read itself (often one error in a short read): the reference
+        # at its first alignment carries the copies; the read itself is then scored in each bin
+        # (mosquito: mito reads with an error had been left on the chr3 NUMT, 2026-11-25)
+        ref = repeat_index.reference_segment(chrom, pos, rev, len(seq))
+        if ref:
+            chroms, starts, w = repeat_index.candidates(ref, min_fraction)
+            if len(chroms):
+                stats["index_ref_lookup"] += 1
+                # the read in its sequenced orientation, the reference on the forward strand: the
+                # anchor must have the read's orientation (diagonals of the read)
+                anchor = ref if not rev else ref.translate(_COMP)[::-1]
     if len(chroms) == 0:
+        if degraded:
+            stats["unplaceable_fallback"] += 1
+            return [], False
         stats["index_fallback"] += 1
         return ([(chrom, pos, int(rev), 1.0, -1)] if chrom in codes else []), False
     stats["index_reads"] += 1
@@ -753,7 +813,8 @@ def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, ma
     for c, b in bins:
         if c not in codes:
             continue
-        sc, ch = repeat_index.score_bin(seq, c, b, qual)
+        sc, ch = (repeat_index.score_bin(seq, c, b, qual) if anchor is None
+                  else repeat_index.score_bin(seq, c, b, qual, anchor=anchor))
         if sc is None:
             continue
         for p, r in ch:
@@ -771,7 +832,8 @@ def index_read_candidates(repeat_index, codes, seq, qual, hit, as_delta, lam, ma
 def reattribute_index_stream(fastq1, fastq2, hits, laws, out_fh, rng, repeat_index, as_delta=30,
                              error_rate=0.01, max_scored=50, min_fraction=0.3,
                              batch_combinations=2_000_000, max_combinations=0, near=100_000,
-                             n_samples=256, index_limit=200_000, near_index=20_000):
+                             n_samples=256, index_limit=200_000, near_index=20_000,
+                             max_fallback_nm=None, requalify_nm=None):
     """
     Index-only re-attribution (no second bowtie2 alignment): the candidates of each group2
     read come from the first alignment and the repeat index (repeat_index_v2.RepeatIndex):
@@ -785,7 +847,9 @@ def reattribute_index_stream(fastq1, fastq2, hits, laws, out_fh, rng, repeat_ind
           more bins (satellites, young repeats): the bins themselves, weighted by the copies of
           the read sequence they carry, strand unknown, resolved to an exact position after
           the draw;
-      - ambiguous read without any repeated minimizer: its first alignment (counted).
+      - ambiguous read without any repeated minimizer: the reference sequence at its first
+        alignment is looked up instead (its copies, the read scored in each); still nothing: its
+        first alignment (counted), or no candidate if its NM >= max_fallback_nm.
     hits: group2_hits_chunk file (streaming_classifier_v2), same order as the FASTQ files.
     """
     lam = score_lambda(error_rate)
@@ -796,7 +860,7 @@ def reattribute_index_stream(fastq1, fastq2, hits, laws, out_fh, rng, repeat_ind
 
     def candidates(seq, qual, hit):
         return index_read_candidates(repeat_index, laws.code, seq, qual, hit, as_delta, lam,
-                                     max_scored, min_fraction, stats)
+                                     max_scored, min_fraction, stats, max_fallback_nm, requalify_nm)
 
     def pairs():
         for (n1, s1, u1), (n2, s2, u2), (nh, h1, h2) in zip(read_fastq(fastq1), read_fastq(fastq2),
@@ -878,7 +942,9 @@ def _reattribute_chunk(job):
                                              job["error_rate"],
                                              max_combinations=job.get("max_combinations", 0),
                                              near=job.get("near", 100_000),
-                                             n_samples=job.get("n_samples", 256))
+                                             n_samples=job.get("n_samples", 256),
+                                             max_fallback_nm=job.get("max_fallback_nm"),
+                                             requalify_nm=job.get("requalify_nm"))
         stats["seconds"] = time.time() - t0
         return stats
     repeat_index = saturation = None
@@ -920,7 +986,7 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 max_alignments="100", as_delta=30, n_workers=1, threads=1, circular=None,
                 bin_size=2000, seed=0, sam_pairs=None, error_rate=0.01, max_combinations=0,
                 near=100_000, n_samples=256, repeat_index=None, index_only=False,
-                exclude_chroms=()):
+                exclude_chroms=(), max_fallback_nm=None, requalify_nm=None):
     """
     Re-attribute all the group2 chunks of classifier_dir (in parallel, one
     process per chunk) and write output_dir/predicted.pairs.
@@ -942,7 +1008,8 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                 index=index, max_alignments=max_alignments, threads=threads, as_delta=as_delta,
                 error_rate=error_rate, max_combinations=max_combinations, near=near,
                 n_samples=n_samples, repeat_index=str(repeat_index) if repeat_index else None,
-                index_only=index_only, exclude=list(exclude_chroms))
+                index_only=index_only, exclude=list(exclude_chroms), max_fallback_nm=max_fallback_nm,
+                requalify_nm=requalify_nm)
     jobs = []
     if sam_pairs:
         for i, (s1, s2) in enumerate(sam_pairs):
@@ -978,7 +1045,11 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
         print(f"Resume: {len(done)} chunk(s) already re-attributed, {len(jobs) - len(done)} to do")
     todo = [j for i, j in enumerate(jobs) if i not in done]
     if n_workers > 1 and len(todo) > 1:
-        with mp.Pool(min(n_workers, len(todo))) as pool:
+        # forkserver, not fork: the workers start from a fresh process, not from a copy of the
+        # caller (hicberg_v2 running stats + rescue in one process: ~18 GB of laws / matrices
+        # inherited by each forked worker, copied page by page as Python touches the objects:
+        # human full run stalled in memory thrashing, 2026-11-24)
+        with mp.get_context("forkserver").Pool(min(n_workers, len(todo))) as pool:
             new = pool.map(reattribute_chunk, todo)
     else:
         new = [reattribute_chunk(j) for j in todo]
@@ -1009,7 +1080,14 @@ def reattribute(classifier_dir, stats_dir, output_dir, index=None, mode="full",
                      f"aligned in each of their <= 50 bins (exact scores), "
                      f"{total['index_reads'] - total['index_scored']} as bins (many copies, "
                      f"{total['index_unplaced']} left at the bin centre), {total['index_fallback']} "
-                     f"without repeated minimizers kept at their first alignment")
+                     f"without repeated minimizers kept at their first alignment "
+                     f"({total.get('index_ref_lookup', 0)} other reads without repeated minimizer: copies found "
+                     f"through the reference at their first alignment)"
+                     + (f"; unique reads with NM >= {requalify_nm} re-examined as ambiguous: "
+                        f"{total.get('unique_requalified', 0)}" if requalify_nm is not None else "")
+                     + (f"; not placeable (no index candidate, NM >= {max_fallback_nm}): "
+                        f"{total['unplaceable_fallback']} ambiguous, {total['unplaceable_unique']} unique reads"
+                        if max_fallback_nm is not None else ""))
     else:
         cand_line = (f"alignments            : "
                      f"{'-a (all)' if str(max_alignments) == 'all' else f'-k {max_alignments}'}, "

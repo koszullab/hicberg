@@ -223,3 +223,76 @@ def test_adapter_reads_go_to_group0(tmp_path):
     sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1)
     stats = (tmp_path / "out" / "stats.txt").read_text()
     assert "adapter     : 1" in stats and "group1      : 1" in stats
+
+
+def test_unique_by_mapq_requalified_by_repeat_index(tmp_path):
+    """A read from the exact copy, reported by bowtie2 on a diverged copy (XS, MAPQ 40, NM 5):
+    the repeat index finds the exact copy → ambiguous; NM < 4 or no index → unique."""
+    import repeat_index_v2 as rix
+    rng = np.random.default_rng(0)
+    g = rng.choice(list("ACGT"), 20000)
+    s = g[3000:3600].copy()
+    d = s.copy()
+    for i in (102, 105, 108, 111, 114):                 # 5 substitutions at the start of the read (100-250)
+        d[i] = {"A": "C", "C": "G", "G": "T", "T": "A"}[d[i]]
+    g[12000:12600] = d
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chr1\n" + "".join(g) + "\n")
+    rix.build_repeat_index(genome, tmp_path / "rix", log=lambda m: None)
+    read = "".join(s[100:250])
+    mate = "".join(g[17000:17150])
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:20000\n"
+
+    def run(nm, verify, workers=1):
+        r1 = "\t".join(["p", "0", "chr1", "12101", "40", "150M", "*", "0", "0", read, "I" * 150,
+                        "AS:i:270", "XS:i:240", f"NM:i:{nm}"]) + "\n"
+        r2 = "\t".join(["p", "16", "chr1", "17001", "42", "150M", "*", "0", "0", mate, "I" * 150,
+                        "AS:i:300", "NM:i:0"]) + "\n"
+        (tmp_path / "1.sam").write_text(head + r1)
+        (tmp_path / "2.sam").write_text(head + r2)
+        out = tmp_path / f"out_{nm}_{verify}_{workers}"
+        sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", out, n_cpus=1, dedup_tol=-1,
+                    verify_unique=str(tmp_path / "rix") if verify else None, verify_workers=workers)
+        return (out / "stats.txt").read_text()
+
+    st = run(5, True)
+    assert "group2      : 1" in st and "requalified ambiguous (a copy as good elsewhere) : 1" in st
+    assert "group1      : 1" in run(3, True)            # NM < 4: not checked
+    assert "group1      : 1" in run(5, False)           # no index: MAPQ decides
+    st = run(5, True, workers=2)                         # parallel pre-pass: same decision
+    assert "group2      : 1" in st and "requalified ambiguous (a copy as good elsewhere) : 1" in st
+
+
+def test_excluded_chromosome_pairs_dropped(tmp_path):
+    head = "@HD\tVN:1.0\n@SQ\tSN:chr1\tLN:100000\n@SQ\tSN:chrY\tLN:100000\n"
+    def line(name, seq, chrom, pos):
+        return "\t".join([name, "0", chrom, str(pos), "42", f"{len(seq)}M", "*", "0", "0",
+                          seq, "I" * len(seq), "AS:i:96"]) + "\n"
+    a, b, c = "ACGT" * 12, "TTGCA" * 9 + "ACG", "GGCAT" * 9 + "TTA"
+    r1 = [line("p1", a, "chr1", 500), line("p2", c, "chr1", 700)]
+    r2 = [line("p1", b, "chr1", 9000), line("p2", b, "chrY", 9000)]
+    (tmp_path / "1.sam").write_text(head + "".join(r1))
+    (tmp_path / "2.sam").write_text(head + "".join(r2))
+    sc.classify(tmp_path / "1.sam", tmp_path / "2.sam", tmp_path / "out", n_cpus=1, dedup_tol=-1,
+                exclude_chroms=["chrY"])
+    st = (tmp_path / "out" / "stats.txt").read_text()
+    assert "group1      : 1" in st and "excluded    : 1" in st
+
+
+def test_is_chimeric_clip_at_either_end():
+    c = sc.parse_cigar
+    assert sc.is_chimeric(c("110M40S"), 150)          # junction at the CIGAR end
+    assert sc.is_chimeric(c("40S110M"), 150)          # junction at the CIGAR start (reverse read 3')
+    assert not sc.is_chimeric(c("10S130M10S"), 150)   # short clips (local mode, read ends)
+    assert not sc.is_chimeric(c("150M"), 150)
+    assert sc.is_chimeric(c("20S60M70S"), 150)        # aligned < 50 %
+
+
+def test_aligned_part_keeps_indels_and_drops_clips():
+    seq = "A" * 40 + "C" * 60 + "G" + "T" * 49
+    qual = "I" * 150
+    s, q = sc.get_largest_M_chunk(sc.parse_cigar("40S60M1I49M"), seq, qual)
+    assert s == seq[40:] and len(q) == 110
+    s, _ = sc.get_largest_M_chunk(sc.parse_cigar("100M50S"), seq, qual)
+    assert s == seq[:100]
+    assert sc.get_largest_M_chunk(sc.parse_cigar("130S20M"), seq, qual) == (None, None)

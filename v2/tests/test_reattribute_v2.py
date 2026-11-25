@@ -183,7 +183,7 @@ def test_density_of_uses_the_refined_map(stats_dir):
     laws.dens_n_fine = np.array([100 if c == "chrA" else 1 for c in laws.names])
     laws.density_fine = {("chrA", "chrA"): np.full((100, 100), 5.0)}
     a, b = laws.code["chrA"], laws.code["chrB"]
-    out = laws.density_of(np.array([a, a]), np.array([1000, 1000]), np.array([a, b]), np.array([5000, 5000]))
+    out = laws.density_of(np.array([a, a]), np.array([1000, 1000]), np.array([a, b]), np.array([9000, 9000]))
     assert out[0] == 5.0 and out[1] != 5.0          # chrA x chrA refined; chrA x chrB global
 
 
@@ -247,3 +247,101 @@ def test_excluded_chromosome_never_receives_reads(stats_dir):
     # index-only path: a unique first alignment on the excluded chromosome gives no candidate
     c, bins = ra.index_read_candidates(None, laws.code, b"A", b"I", ("chrB", 100, False, 60, True), 30, 1.0)
     assert c == [] and bins is False
+
+
+def test_density_diagonal_below_min_distance(stats_dir):
+    laws = ra.Laws(stats_dir, "full")
+    a, b = laws.code["chrA"], laws.code["chrB"]
+    c = np.array([a, a, a]); p1 = np.array([10_000, 10_000, 10_000])
+    c2 = np.array([a, a, b]); p2 = np.array([12_000, 60_000, 12_000])
+    laws.density_fine = {}
+    laws.dens_min = 0
+    raw = laws.density_of(c, p1, c2, p2)
+    laws.dens_min = 5000
+    out = laws.density_of(c, p1, c2, p2)
+    diag = laws.density_any(c[:1], p1[:1], c[:1], p1[:1])[0]
+    assert out[0] == diag and out[1] == raw[1] and out[2] == raw[2]   # < 5 kb: diagonal value
+
+
+def test_read_hits_with_and_without_nm(tmp_path):
+    old = tmp_path / "old.tsv"
+    old.write_text("r1\tchrA\t10\t+\t60\t0\tchrB\t20\t-\t50\t1\n")
+    new = tmp_path / "new.tsv"
+    new.write_text("r1\tchrA\t10\t+\t60\t0\t5\tchrB\t20\t-\t50\t1\t0\n")
+    (_, a1, a2), = ra.read_hits(old)
+    (_, b1, b2), = ra.read_hits(new)
+    assert a1 == ("chrA", 10, False, 60, False, -1) and a2 == ("chrB", 20, True, 50, True, -1)
+    assert b1 == ("chrA", 10, False, 60, False, 5) and b2 == ("chrB", 20, True, 50, True, 0)
+
+
+class _NoCandidates:
+    def candidates(self, seq, min_fraction=0.8):
+        return [], np.zeros(0, np.int64), np.zeros(0)
+
+
+def test_degraded_read_without_index_candidate_not_placed():
+    codes = {"chrA": 0}
+    idx = _NoCandidates()
+    st = ra._new_stats()
+    hit = ("chrA", 100, False, 150, False, 5)               # ambiguous, NM 5, no index candidate
+    assert ra.index_read_candidates(idx, codes, b"A", b"I", hit, 30, 1.0, stats=st)[0]   # rule off
+    c, _ = ra.index_read_candidates(idx, codes, b"A", b"I", hit, 30, 1.0, stats=st, max_fallback_nm=4)
+    assert c == [] and st["unplaceable_fallback"] == 1
+    ok = ("chrA", 100, False, 150, False, 1)                 # NM 1: kept at its first alignment
+    assert ra.index_read_candidates(idx, codes, b"A", b"I", ok, 30, 1.0, stats=st, max_fallback_nm=4)[0]
+    uq = ("chrA", 100, False, 150, True, 6)                  # unique but degraded, no copy
+    c, _ = ra.index_read_candidates(idx, codes, b"A", b"I", uq, 30, 1.0, stats=st, max_fallback_nm=4)
+    assert c == [] and st["unplaceable_unique"] == 1
+    old = ("chrA", 100, False, 150, False, -1)               # NM unknown (old hits): kept
+    assert ra.index_read_candidates(idx, codes, b"A", b"I", old, 30, 1.0, stats=st, max_fallback_nm=4)[0]
+
+
+def test_fallback_read_found_through_its_reference(tmp_path):
+    """A short read with one error in the middle has no intact k-mer (no repeated minimizer): its
+    copies are found through the reference at its first alignment, then the read is scored in each."""
+    import repeat_index_v2 as rix
+    rng = np.random.default_rng(0)
+    g = rng.choice(list("ACGT"), 30000)
+    g[20000:20600] = g[5000:5600]                             # two identical copies
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chrA\n" + "".join(g) + "\n")
+    rix.build_repeat_index(genome, tmp_path / "rix", log=lambda m: None)
+    idx = rix.RepeatIndex(tmp_path / "rix")
+    read = list(g[5100:5140])
+    read[20] = {"A": "C", "C": "G", "G": "T", "T": "A"}[read[20]]
+    read = "".join(read).encode()
+    assert len(idx.candidates(read, 0.3)[0]) == 0             # no repeated minimizer in the read
+    assert idx.reference_segment("chrA", 5101, False, 40) == "".join(g[5100:5140]).encode()
+    st = ra._new_stats()
+    c, bins = ra.index_read_candidates(idx, {"chrA": 0}, read, b"I" * 40, ("chrA", 20101, False, 70, False),
+                                       30, 1.0, stats=st)
+    assert st["index_ref_lookup"] == 1 and st["index_fallback"] == 0
+    assert {p // 1000 for _, p, *_ in c} >= {5, 20}           # both copies are candidates
+    # same read sequenced from the reverse strand (5' = 0-based exclusive end of the alignment)
+    rc = read.translate(bytes.maketrans(b"ACGT", b"TGCA"))[::-1]
+    st = ra._new_stats()
+    c, _ = ra.index_read_candidates(idx, {"chrA": 0}, rc, b"I" * 40, ("chrA", 20140, True, 70, False),
+                                    30, 1.0, stats=st)
+    assert st["index_ref_lookup"] == 1 and st["index_fallback"] == 0
+    assert {p // 1000 for _, p, *_ in c} >= {5, 20} and {r for _, _, r, *_ in c} == {1}
+
+
+def test_degraded_unique_read_requalified(tmp_path):
+    """A unique read (MAPQ) with NM >= requalify_nm is re-examined: its copies become candidates."""
+    import repeat_index_v2 as rix
+    rng = np.random.default_rng(1)
+    g = rng.choice(list("ACGT"), 30000)
+    g[20000:20600] = g[5000:5600]
+    genome = tmp_path / "g.fa"
+    genome.write_text(">chrA\n" + "".join(g) + "\n")
+    rix.build_repeat_index(genome, tmp_path / "rix", log=lambda m: None)
+    idx = rix.RepeatIndex(tmp_path / "rix")
+    read = "".join(g[5100:5250]).encode()
+    st = ra._new_stats()
+    hit = ("chrA", 5101, False, 280, True, 5)                 # unique by MAPQ, NM 5
+    c, _ = ra.index_read_candidates(idx, {"chrA": 0}, read, b"I" * 150, hit, 30, 1.0, stats=st)
+    assert len(c) == 1                                          # off: kept at its first alignment
+    c, _ = ra.index_read_candidates(idx, {"chrA": 0}, read, b"I" * 150, hit, 30, 1.0, stats=st, requalify_nm=4)
+    assert st["unique_requalified"] == 1 and {p // 1000 for _, p, *_ in c} >= {5, 20}
+    ok = ("chrA", 5101, False, 300, True, 1)                    # NM 1: unique as before
+    assert len(ra.index_read_candidates(idx, {"chrA": 0}, read, b"I" * 150, ok, 30, 1.0, stats=st, requalify_nm=4)[0]) == 1
