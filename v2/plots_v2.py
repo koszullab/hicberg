@@ -56,6 +56,22 @@ DENSITY_BIN, DENSITY_MASK = "density_bin_size.npy", "density_mask.npy"
 PS_COUNTS, MAPPABILITY, COVERAGE_KEPT = "ps_counts.npz", "mappability.npy", "coverage_kept.npy"
 
 # Same colours as hicberg/plot.py
+DISPLAY_NAMES = "display_names.npy"   # {identifier: readable name} (statistics_v2, from the FASTA headers)
+_NAMES = {}
+
+
+def set_display_names(stats_dir):
+    """Readable sequence names (chr1 ... chrX, Mitochondria) for the titles, if the statistics
+    folder has them; identifiers otherwise."""
+    global _NAMES
+    p = Path(stats_dir) / DISPLAY_NAMES if stats_dir else None
+    _NAMES = np.load(p, allow_pickle=True).item() if p is not None and p.is_file() else {}
+
+
+def _n(c):
+    return _NAMES.get(c, c)
+
+
 LAWS = (
     (UNCUTS,  "+- (uncut)",   "salmon"),
     (CIRCLES, "-+ (circle)",  "limegreen"),
@@ -102,6 +118,7 @@ def plot_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "reference"))
     One page per chromosome: P(s) of the 3 event types, log-log.
     With compare_dir, the reference laws are overlaid as lines.
     """
+    set_display_names(stats_dir)
     xs = load_dict(stats_dir, XS)
     laws = {f: load_dict(stats_dir, f) for f, _, _ in LAWS}
     xs_ref = load_dict(compare_dir, XS) if compare_dir else None
@@ -120,7 +137,7 @@ def plot_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "reference"))
                             color=color, alpha=0.8, label=f"{label} {labels[1]}")
 
             missing = [lab for lab, d in zip(labels, (xs, xs_ref)) if d is not None and chrom not in d]
-            title = f"P(s) — {chrom}" + (f"  (absent in {', '.join(missing)})" if missing else "")
+            title = f"P(s) — {_n(chrom)}" + (f"  (absent in {', '.join(missing)})" if missing else "")
             if not any(len(l.get_xdata()) for l in ax.get_lines()):
                 # no pair on this sequence (e.g. small unmappable scaffold): skip the page
                 plt.close(fig)
@@ -158,7 +175,7 @@ def plot_ps_ratio(stats_dir, compare_dir, output_pdf, labels=("v2", "reference")
 
             ax.axhline(1, color="black", lw=1)
             ax.set(xscale="log", yscale="log", ylim=(0.5, 2),
-                   title=f"P(s) ratio {labels[0]} / {labels[1]} — {chrom}",
+                   title=f"P(s) ratio {labels[0]} / {labels[1]} — {_n(chrom)}",
                    xlabel="Genomic distance (bp, log bins)", ylabel="Ratio")
             ax.grid(True, which="both", alpha=0.3)
             ax.legend(fontsize=8)
@@ -204,6 +221,7 @@ def plot_orientations(stats_dir, output_pdf, min_pairs=50):
     at large distance; excess of +- (dangling ends) and -+ (self-circles)
     at short distance.
     """
+    set_display_names(stats_dir)
     path = Path(stats_dir) / PS_COUNTS
     if not path.is_file():
         print(f"  {PS_COUNTS} not found in {stats_dir}: orientations plot skipped")
@@ -233,7 +251,7 @@ def plot_orientations(stats_dir, output_pdf, min_pairs=50):
                 ax.plot(x[keep], counts[k, keep] / total[keep], "o-", ms=3, lw=0.8,
                         color=ORIENT_COLORS.get(o), label=o)
             ax.axhline(0.25, color="black", lw=1, ls="--")
-            ax.set(xscale="log", ylim=(0, 1), title=f"Pair orientations — {name}",
+            ax.set(xscale="log", ylim=(0, 1), title=f"Pair orientations — {_n(name)}",
                    xlabel="Genomic distance (bp, log bins)",
                    ylabel=f"Fraction of pairs (bins with ≥ {min_pairs} pairs)")
             ax.grid(True, which="major", alpha=0.4)
@@ -253,6 +271,7 @@ def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
     One page per chromosome: raw coverage (points) + smoothed (line), and the
     fraction of mappable positions per bin (right axis) if available.
     """
+    set_display_names(stats_dir)
     raw, smooth = load_dict(stats_dir, COVERAGE_RAW), load_dict(stats_dir, COVERAGE)
     smooth_ref = load_dict(compare_dir, COVERAGE) if compare_dir else None
     mappability = load_dict(stats_dir, MAPPABILITY)
@@ -276,7 +295,7 @@ def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
             if smooth_ref is not None and chrom in smooth_ref:
                 ax.plot(smooth_ref[chrom], color="orange", lw=1, alpha=0.8,
                         label=f"final {labels[1]}")
-            ax.set(title=f"Coverage — {chrom} — bins of {bin_size} bp",
+            ax.set(title=f"Coverage — {_n(chrom)} — bins of {bin_size} bp",
                    xlabel="Bin number", ylabel="Number of reads")
             ax.grid(True, alpha=0.4)
             handles, labels_ = ax.get_legend_handles_labels()
@@ -292,6 +311,65 @@ def plot_coverage(stats_dir, output_pdf, bin_size=2000, compare_dir=None,
             plt.close(fig)
 
 
+def plot_effective_mappability(stats_dir, output_pdf, step=0.05):
+    """
+    Calibration of the effective mappable fraction e(f) of the run (statistics_v2.
+    effective_mappability_curve): top, local coverage ratio of each coverage bin (coverage / mean
+    coverage of the fully mappable bins within +-50 kb) against its mappable fraction f (2-D
+    histogram), mean per class of f, calibrated curve e(f) (effective_mappability.tsv) and the
+    identity e = f (mappability track taken as is); bottom, number of bins per class of f.
+    Returns False if the files are missing.
+    """
+    import statistics_v2 as st
+    raw, frac = load_dict(stats_dir, COVERAGE_RAW), load_dict(stats_dir, MAPPABILITY)
+    sizes = load_dict(stats_dir, CHROM_SIZES)
+    tsv = Path(stats_dir) / "effective_mappability.tsv"
+    if raw is None or frac is None or sizes is None or not tsv.is_file():
+        return False
+    curve = np.loadtxt(tsv, skiprows=1, ndmin=2)
+    r, f = st.local_coverage_ratios(raw, frac, sizes)
+    if len(r) == 0:
+        return False
+    edges = np.arange(0, 1 + step / 2, step)
+    k = np.clip(np.digitize(f, edges[1:-1]), 0, len(edges) - 2)
+    n = np.bincount(k, minlength=len(edges) - 1)
+    mean_r = np.bincount(k, weights=r, minlength=len(edges) - 1) / np.maximum(n, 1)
+    mean_f = np.bincount(k, weights=f, minlength=len(edges) - 1) / np.maximum(n, 1)
+    good = n >= 20
+
+    fig, (ax, axh) = plt.subplots(2, 1, figsize=(8, 8), height_ratios=(3, 1), sharex=True)
+    h, xe, ye = np.histogram2d(f, r, bins=(np.linspace(0, 1, 101), np.linspace(0, 2, 101)))
+    h = np.where(h > 0, h, np.nan)
+    ax.pcolormesh(xe, ye, np.log10(h).T, cmap="Greys", vmin=0, rasterized=True)
+    ax.plot([0, 1], [0, 1], ls=(0, (4, 3)), lw=1.5, color="#5f5e5a", label="e = f (mappability track as is)")
+    ax.plot(curve[:, 0], curve[:, 1], lw=2.5, color="#2a78d6", label="e(f) used (monotone fit)", zorder=3)
+    ax.plot(mean_f[good], mean_r[good], "o", ms=8, color="#eb6834", mec="white", mew=1.5,
+            label="mean ratio per class of f", zorder=4)
+    for q in (0.2, 0.5, 0.8):
+        e = np.interp(q, curve[:, 0], curve[:, 1])
+        ax.annotate(f"e({q}) = {e:.2f}", (q, e), xytext=(-10, 22), textcoords="offset points",
+                    fontsize=9, color="#2a2a28", ha="right", zorder=5,
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85),
+                    arrowprops=dict(arrowstyle="-", color="#5f5e5a", lw=0.8))
+    ax.set(xlim=(0, 1), ylim=(0, 2), ylabel="coverage / coverage of the fully mappable bins (±50 kb)",
+           title=f"Effective mappable fraction e(f), calibrated on the unique pairs of the run\n"
+                 f"{len(r):,} coverage bins; grey: number of bins (log scale)")
+    ax.grid(color="#e6e5e0", lw=0.6)
+    ax.legend(frameon=False, fontsize=9, loc="upper left")
+    axh.bar(edges[:-1], n, width=step, align="edge", color=np.where(good, "#2a78d6", "#c8c7c2"),
+            edgecolor="white", lw=1)
+    axh.set(yscale="log", xlabel="mappable fraction f of the bin (mappability track)",
+            ylabel="bins")
+    axh.grid(color="#e6e5e0", lw=0.6, axis="y")
+    for a in (ax, axh):
+        for s_ in ("top", "right"):
+            a.spines[s_].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(output_pdf)
+    plt.close(fig)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Trans P(s)
 # ---------------------------------------------------------------------------
@@ -303,8 +381,34 @@ def _trans_matrix(trans_ps, chroms):
     return m
 
 
+def trans_oe(m, n_iter=200):
+    """
+    Observed / expected of a chromosome x chromosome trans matrix (diagonal ignored): iterative
+    balancing (ICE-like) to equal marginals, then divided by the mean. Every per-chromosome
+    factor (mappable length, copy number, coverage, digestion) is absorbed by the balancing, so
+    the trans P(s) can be balanced directly instead of the counts. 1 = no preference.
+    Chromosomes without any trans value (excluded) get NaN.
+    """
+    x = np.where(np.isfinite(m) & (m > 0), m, 0.0).astype(np.float64)
+    np.fill_diagonal(x, 0.0)
+    ok = x.sum(axis=1) > 0
+    b = np.where(ok, 1.0, 0.0)
+    for _ in range(n_iter):
+        s = (x * b[:, None] * b[None, :]).sum(axis=1)
+        mean = s[ok].mean()
+        b[ok] /= np.sqrt(s[ok] / mean)
+    bal = x * b[:, None] * b[None, :]
+    off = ~np.eye(len(x), dtype=bool) & ok[:, None] & ok[None, :] & (bal > 0)
+    oe = np.full(x.shape, np.nan)
+    oe[off] = bal[off] / bal[off].mean()
+    return oe
+
+
 def plot_trans_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "reference")):
-    """Heatmap of log10 trans P(s); with compare_dir, side by side + scatter."""
+    """Heatmap of log10 trans P(s) (the absolute rates used for the re-attribution weights), then
+    the balanced observed / expected (relative contact preferences, display only); with
+    compare_dir, side by side + scatter."""
+    set_display_names(stats_dir)
     tps = load_dict(stats_dir, TRANS_PS)
     chroms = list(load_dict(stats_dir, XS))
     m = _trans_matrix(tps, chroms)
@@ -323,10 +427,29 @@ def plot_trans_ps(stats_dir, output_pdf, compare_dir=None, labels=("v2", "refere
         fig, axes = plt.subplots(1, len(panels), figsize=(8 * len(panels), 7.5), squeeze=False)
         for ax, (label, _), lm in zip(axes[0], panels, logs):
             im = opaque_imshow(ax, lm, "Wistia", vmin, vmax)
-            ax.set_xticks(range(len(chroms)), chroms, rotation=90, fontsize=7)
-            ax.set_yticks(range(len(chroms)), chroms, fontsize=7)
-            ax.set_title(f"log10 trans P(s) — {label}")
+            ax.set_xticks(range(len(chroms)), [_n(c) for c in chroms], rotation=90, fontsize=7)
+            ax.set_yticks(range(len(chroms)), [_n(c) for c in chroms], fontsize=7)
+            ax.set_title(f"log10 trans P(s) — {label}\ncontacts per pair of mappable positions: "
+                         f"used for the re-attribution weights", fontsize=10)
             fig.colorbar(im, ax=ax, fraction=0.046)
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # relative contacts: observed / expected after balancing (display only, not in the weights)
+        oes = [(lab, trans_oe(p)) for lab, p in panels]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            loe = [np.log2(o) for _, o in oes]
+        allv = np.concatenate([l[np.isfinite(l)] for l in loe]) if any(np.isfinite(l).any() for l in loe) else np.array([1.0])
+        lim = float(np.clip(np.percentile(np.abs(allv), 98), 0.3, 2.0))
+        fig, axes = plt.subplots(1, len(oes), figsize=(8 * len(oes), 7.5), squeeze=False)
+        for ax, (label, _), lo in zip(axes[0], oes, loe):
+            im = opaque_imshow(ax, lo, "RdBu_r", -lim, lim, bad="lightgrey")
+            ax.set_xticks(range(len(chroms)), [_n(c) for c in chroms], rotation=90, fontsize=7)
+            ax.set_yticks(range(len(chroms)), [_n(c) for c in chroms], fontsize=7)
+            ax.set_title(f"log2 observed / expected trans contacts — {label}\nrelative contacts "
+                         f"(balanced with ICE): display only, not used for the weights", fontsize=10)
+            fig.colorbar(im, ax=ax, fraction=0.046, label="log2 O/E")
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
@@ -418,8 +541,8 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0, c
         ax.set_title(title, fontsize=9)
         if ticks:
             pos, lab = ticks
-            ax.set_xticks(pos, lab, rotation=90, fontsize=6)
-            ax.set_yticks(pos, lab, fontsize=6)
+            ax.set_xticks(pos, [_n(x) for x in lab], rotation=90, fontsize=6)
+            ax.set_yticks(pos, [_n(x) for x in lab], fontsize=6)
         return im
 
     with PdfPages(output_pdf) as pdf:
@@ -443,8 +566,8 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0, c
             fig, axes = plt.subplots(1, len(loaded), figsize=(6 * len(loaded), 5), squeeze=False)
             for ax, (lab, d) in zip(axes[0], loaded):
                 if pair in d:
-                    im = show(ax, d[pair], f"{lab} — {pair[0]} × {pair[1]}")
-                    ax.set(xlabel=f"{pair[1]} bin", ylabel=f"{pair[0]} bin")
+                    im = show(ax, d[pair], f"{lab} — {_n(pair[0])} × {_n(pair[1])}")
+                    ax.set(xlabel=f"{_n(pair[1])} bin", ylabel=f"{_n(pair[0])} bin")
             fig.colorbar(im, ax=axes[0].tolist(), fraction=0.02, label="log2 density")
             pdf.savefig(fig)
             plt.close(fig)
@@ -452,7 +575,7 @@ def plot_density(maps, output_pdf, max_pixels=2000, zoom_pairs=None, vlim=2.0, c
 
 def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=200,
                           vlim=1.5, vlim_raw=3.0, raw_bin_intra=1, raw_bin_trans=5,
-                          chroms=None):
+                          chroms=None, min_bins=5):
     """
     One page per chromosome (density_intra.pdf) and per pair of chromosomes
     (density_trans.pdf, at most max_trans_pairs), with 2 matrices side by side,
@@ -462,8 +585,11 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
         exp): 1 (2 kb) in intra, 5 (10 kb) in trans where 2-kb pixels hold
         0 or 1 contact; log2 range ±vlim_raw
       - the density used by the re-attribution; log2 range ±vlim
+    Only the sequences with >= min_bins density bins get pages (5: Wolbachia, 7 bins of 200 kb, kept; small scaffolds: 1-2 bins of
+    200 kb in the mosquito, unreadable pages that filled the 200 trans pages).
     Needs density_map.npy and contacts.npz (statistics_v2.py).
     """
+    set_display_names(stats_dir)
     import itertools
     from scipy import sparse
     import density_v2 as dn
@@ -478,6 +604,11 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
     offsets = dict(zip(all_names,
                        np.concatenate([[0], np.cumsum([n_bins[c] for c in all_names])[:-1]])))
     names = [c for c in all_names if chroms is None or c in set(chroms)]
+    small = [c for c in names if n_bins[c] < min_bins]
+    if small:
+        print(f"  density_intra / trans.pdf: {len(small)} sequences with < {min_bins} density bins "
+              f"left out ({', '.join(_n(c) for c in small[:5])}{', ...' if len(small) > 5 else ''})")
+        names = [c for c in names if n_bins[c] >= min_bins]
     if (stats_dir / DENSITY_BIN).is_file():
         bin_size = int(np.load(stats_dir / DENSITY_BIN))
 
@@ -511,23 +642,39 @@ def plot_density_matrices(stats_dir, output_dir, bin_size=2000, max_trans_pairs=
     kb = bin_size / 1000
 
     def page(pdf, a, b):
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize, to_rgb
         k = raw_bin_intra if a == b else raw_bin_trans
+        # raw map aggregated to <= ~600 pixels per side: at 50 kb a whole human chromosome has
+        # 0-1 contact per far pixel and showed nothing but the zero colour
+        k = max(k, int(np.ceil(max(sizes[a], sizes[b]) / bin_size / 600)))
         extent = (0, sizes[b] / 1e3, sizes[a] / 1e3, 0)          # axes in kb
-        panels = [(f"raw obs / exp {kb * k:g} kb (not smoothed)", raw_obs_exp(a, b, k), vlim_raw),
+        raw = raw_obs_exp(a, b, k)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zr = np.log2(raw[np.isfinite(raw) & (raw > 0)])
+        lim_raw = float(np.clip(np.percentile(np.abs(zr), 98), 1.0, vlim_raw)) if zr.size else vlim_raw
+        panels = [(f"raw obs / exp {kb * k:g} kb (not smoothed)", raw, lim_raw),
                   (f"density (unbiased, adaptive Gaussian), {kb:g} kb", density[(a, b)], vlim)]
+        # very different sizes (mosquito chromosome x Wolbachia: 160x): real proportions leave a
+        # line of pixels; the short axis is stretched instead (said in the title)
+        stretch = max(sizes[a], sizes[b]) > 8 * min(sizes[a], sizes[b])
         fig, axes = plt.subplots(1, 2, figsize=(15, 6.2), gridspec_kw={"wspace": 0.45})
         for ax, (lab, mat, lim) in zip(axes, panels):
             with np.errstate(divide="ignore", invalid="ignore"):
                 z = np.log2(mat)
-            z[mat == 0] = -lim           # zero contact: darkest blue (grey = excluded bins only)
-            im = opaque_imshow(ax, z, cmap, -lim, lim, bad="lightgrey",
-                               extent=extent, aspect="equal")
+            norm = Normalize(-lim, lim)
+            rgb = cmap(norm(np.clip(np.where(np.isfinite(z), z, 0.0), -lim, lim)))[..., :3]
+            rgb[mat == 0] = to_rgb("white")                 # zero contact
+            rgb[~np.isfinite(mat)] = to_rgb("lightgrey")     # excluded bins
+            ax.imshow(rgb, extent=extent, aspect="auto" if stretch else "equal", interpolation="none")
             ax.set_title(lab, fontsize=9)
-            ax.set(xlabel=f"{b} (kb)", ylabel=f"{a} (kb)")
-            fig.colorbar(im, ax=ax, fraction=0.046 * min(1.0, sizes[a] / sizes[b]), pad=0.03,
-                         label="log2")
-        title = a if a == b else f"{a} × {b}"
-        fig.suptitle(f"{title} — grey = excluded bins, darkest blue = 0 contact", fontsize=11)
+            ax.set(xlabel=f"{_n(b)} (kb)", ylabel=f"{_n(a)} (kb)")
+            fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax,
+                         fraction=0.046 if stretch else 0.046 * min(1.0, sizes[a] / sizes[b]),
+                         pad=0.03, label="log2")
+        title = _n(a) if a == b else f"{_n(a)} × {_n(b)}"
+        fig.suptitle(f"{title} — grey = excluded bins, white = 0 contact"
+                     + (" — not to scale (short axis stretched)" if stretch else ""), fontsize=11)
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -654,18 +801,19 @@ def plot_contact_maps(pairs_files, chrom_sizes, output_pdf, bin_size=2000, genom
             if chromosomes is not None and c not in chromosomes:
                 continue
             sel = np.arange(offsets[i], offsets[i] + n_bins[i])
-            page(pdf, f"{c} — {bin_size // 1000} kb bins", sel,
+            page(pdf, f"{_n(c)} — {bin_size // 1000} kb bins", sel,
                  x_kb=(np.arange(n_bins[i]) + 0.5) * bin_size / 1000)
         for c, lo, hi in (regions or []):
             i = names.index(c)
             b0, b1 = int(lo * 1000 // bin_size), min(int(-(-hi * 1000 // bin_size)), n_bins[i])
-            page(pdf, f"{c} {lo}-{hi} kb — {bin_size // 1000} kb bins", offsets[i] + np.arange(b0, b1),
+            page(pdf, f"{_n(c)} {lo}-{hi} kb — {bin_size // 1000} kb bins", offsets[i] + np.arange(b0, b1),
                  x_kb=(np.arange(b0, b1) + 0.5) * bin_size / 1000)
     return mats
 
 
 def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
              labels=("v2", "reference"), plot_chroms=None):
+    set_display_names(stats_dir)
     output_dir = Path(output_dir or stats_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     done = []
@@ -679,6 +827,11 @@ def plot_all(stats_dir, output_dir=None, compare_dir=None, bin_size=2000,
         done.append("orientations.pdf")
     plot_coverage(stats_dir, output_dir / "coverage.pdf", bin_size, compare_dir, labels)
     done.append("coverage.pdf")
+    try:
+        if plot_effective_mappability(stats_dir, output_dir / "effective_mappability.pdf"):
+            done.append("effective_mappability.pdf")
+    except Exception as err:      # a plot must not stop the pipeline
+        print(f"  [warning] effective_mappability.pdf not made: {err}")
     plot_trans_ps(stats_dir, output_dir / "trans_ps.pdf", compare_dir, labels)
     done.append("trans_ps.pdf")
     if (Path(stats_dir) / DENSITY).is_file():

@@ -127,7 +127,7 @@ def data_density_bin_size(ps_counts, xs, chrom_sizes, bin_size, n_min=200, windo
 
 
 def contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize=5_000_000,
-                   split_halves=False, seed=0):
+                   split_halves=False, seed=0, min_cis_distance=0):
     """
     Genome-wide symmetric contact matrix (scipy CSR, int64) from a pairs file.
     bin = (pos - 1) // bin_size (1-based positions, same as the coverage and
@@ -135,6 +135,9 @@ def contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize=5_000_000,
     Each pair is counted once in the upper triangle, then symmetrised.
     split_halves: also return the matrices of two random halves of the pairs
     (cross-validation of the density threshold): (full, [half_0, half_1]).
+    min_cis_distance: cis pairs closer than this (bp) are left out (uncuts, self-ligations,
+    loops of the restriction fragments: P(s) by orientation describes them; the density then
+    holds the chromatin structure only, diagonal included).
     """
     names = list(chrom_sizes)
     n_bins, offsets = genome_bins(chrom_sizes, bin_size)
@@ -145,6 +148,9 @@ def contact_matrix(pairs_path, chrom_sizes, bin_size, chunksize=5_000_000,
     for c1, p1, c2, p2, _, _ in st.iter_pairs(pairs_path, names, chunksize):
         ok = (c1 >= 0) & (c2 >= 0)
         c1, p1, c2, p2 = c1[ok], p1[ok], c2[ok], p2[ok]
+        if min_cis_distance > 0:
+            far = (c1 != c2) | (np.abs(p2 - p1) >= min_cis_distance)
+            c1, p1, c2, p2 = c1[far], p1[far], c2[far], p2[far]
         b1 = offsets[c1] + np.minimum((p1 - 1) // bin_size, n_bins[c1] - 1)
         b2 = offsets[c2] + np.minimum((p2 - 1) // bin_size, n_bins[c2] - 1)
         i, j = np.minimum(b1, b2), np.maximum(b1, b2)
@@ -423,9 +429,51 @@ def adaptive_gaussian(obs, expected, n_min=200, sigmas=GAUSSIAN_SIGMAS):
     return out, used
 
 
+def fill_masked_by_diagonal(z, bad):
+    """Intra block z (n x n, symmetric), bad = masked bins: every pixel of a masked row or
+    column replaced, diagonal by diagonal, by the linear interpolation along that diagonal
+    between its measured pixels (constant beyond the last one); a diagonal without any measured
+    pixel takes the mean of the measured pixels of the nearest measured diagonals below and
+    above (1 if none). Symmetric result."""
+    n = z.shape[0]
+    out = z.copy()
+    idx = np.arange(n)
+    diag_mean = np.full(n, np.nan)
+    empty = []
+    for k in range(n):
+        i = idx[:n - k]
+        j = i + k
+        miss = bad[i] | bad[j]
+        ok = ~miss
+        vals = z[i, j]
+        if ok.any():
+            diag_mean[k] = vals[ok].mean()
+        if not miss.any():
+            continue
+        if ok.any():
+            fill = np.interp(i[miss], i[ok], vals[ok])
+            out[i[miss], j[miss]] = fill
+            out[j[miss], i[miss]] = fill
+        else:
+            empty.append(k)
+    have = np.flatnonzero(np.isfinite(diag_mean))
+    for k in empty:
+        i = idx[:n - k]
+        j = i + k
+        if len(have):
+            lo, hi = have[have < k], have[have > k]
+            near = [diag_mean[x[-1]] for x in (lo,) if len(x)] + [diag_mean[x[0]] for x in (hi,) if len(x)]
+            v = float(np.mean(near))
+        else:
+            v = 1.0
+        out[i, j] = v
+        out[j, i] = v
+    return out
+
+
 def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method="v1",
                   smoothing="fixed", windows=DENSITY_WINDOWS, n_min=200,
-                  w_row=None, w_col=None):
+                  w_row=None, w_col=None, masked="interpolate", diag="one"):
     """
     Density map of one chromosome pair (mat: counts with NaN on bad bins).
     method "v1": previous version (expected from the positive values only,
@@ -471,7 +519,34 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
     nonzero = smooth[(smooth != 0) & np.isfinite(smooth)]
     if len(nonzero):
         smooth[smooth == 0] = nonzero.min()
-    if intra:
+    # masked rows / columns (no unique data: satellite arrays, rDNA...): neutral density. The
+    # smoothing would extrapolate them from their flanks while the diagonal is forced to 1: a
+    # constant off-diagonal value (human: 0.17-0.5 inside HSat2 / HSat3) against 1 on the
+    # diagonal pulled the re-attributed contacts towards short distances (known truth: 1-10 kb
+    # pairs x2 inside the arrays); with 1, P(s) alone decides there, as it should
+    # masked="interpolate": keep the smoothing's values (extrapolated from the flanks), the
+    # previous behaviour, to be compared once the flanks are weighted by the effective mappability
+    # masked="diagonal": intra, each diagonal (fixed distance) interpolated linearly along itself
+    # between its measured pixels, so that a masked array takes the values of its flanks at the
+    # same distance; no isotropic kernel, hence no round shapes (the adaptive Gaussian filled
+    # the large unmappable regions with disks and rings, chr9 pericentromere); trans: the
+    # adaptive Gaussian is kept (no distance there; it infers e.g. the centromere-centromere
+    # enrichment of the masked centromeric bins from their neighbours, as in yeast)
+    bad_r = np.isnan(counts).all(axis=1)
+    bad_c = np.isnan(counts).all(axis=0)
+    if masked == "neutral":
+        smooth[bad_r, :] = 1.0
+        smooth[:, bad_c] = 1.0
+    elif masked == "diagonal" and intra:
+        smooth = fill_masked_by_diagonal(smooth, bad_r)
+    elif masked not in ("interpolate", "diagonal"):
+        raise ValueError(f"Unknown masked-bin fill: {masked}")
+    # diag="one": the diagonal (pairs inside one density bin) forced to 1, P(s) alone deciding
+    # there (2 kb bins: the uncuts / self-ligations); "informative": kept (density computed
+    # without the short cis pairs, contact_matrix(min_cis_distance): with 50-200 kb bins the
+    # diagonal holds the structure of the domains, and forcing it to 1 against smoothed
+    # neighbours created a contrast)
+    if intra and diag == "one":
         np.fill_diagonal(smooth, 1.0)
     return smooth
 
@@ -483,7 +558,7 @@ def block_density(mat, intra, patch_small=15, patch_large=45, max_val=10, method
 def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
                  patch_small=15, patch_large=45, max_val=10, method="v1",
                  smoothing="fixed", windows=DENSITY_WINDOWS, n_min=200, weights=None,
-                 n_min_trans=None):
+                 n_min_trans=None, masked="interpolate", diag="one"):
     """
     {(chrom_a, chrom_b): density} for every pair of chromosomes (a <= b in
     the chromosome order, as v1). bad_bins: boolean array over the genome bins
@@ -509,7 +584,8 @@ def density_maps(matrix, chrom_sizes, bin_size, bad_bins=None,
                                     smoothing=smoothing, windows=windows,
                                     n_min=n_min if (a == b or n_min_trans is None) else n_min_trans,
                                     w_row=None if weights is None else weights[ra],
-                                    w_col=None if weights is None else weights[rb])
+                                    w_col=None if weights is None else weights[rb],
+                                    masked=masked, diag=diag)
     return out
 
 

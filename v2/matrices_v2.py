@@ -395,7 +395,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                       sites=None, enzyme_label="restriction sites", chrom_pairs=None,
                       intra_only=False, vmin_raw=None, vmax_raw=None,
                       labels=("unrescued", "rescued"), repeat_links=None, min_link_kmers=3,
-                      max_arcs=400, display_names=None):
+                      max_arcs=400, display_names=None, regions=None, annotations=None):
     """
     Two multi-page PDFs (matrices_raw.pdf, matrices_normalised.pdf), one page
     per pair of chromosomes (all pairs, or intra only, or chrom_pairs), as in
@@ -409,6 +409,13 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
     {chrom: value per bin} at the bin size of the matrices.
     Maps keep their real proportions; the tracks have exactly the width of
     their map.
+    regions: [(chrom, start, end), ...] → one intra page per genomic window instead of whole
+    chromosomes (tracks sliced to the window; colour scale up to the 99.5th percentile so that
+    loops and domains show next to the saturated diagonal).
+    annotations (windows only): {"genes": DataFrame chrom start end name biotype strand,
+    "repeats": DataFrame chrom start end cls (RepeatMasker class), "censat": DataFrame chrom start
+    end name rgb} with the cooler's chromosome names → a third track row: genes under the left
+    map, repeat classes + satellite annotation under the right one.
     """
     import cooler
     from plots_v2 import opaque_imshow
@@ -526,26 +533,87 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         for side_ in ("top", "left", "right"):
             ax_top.spines[side_].set_visible(False)
 
-    def track(values, n):
+    def track(values, n, i0=0):
         if values is None:
             return None
         v = np.full(n, np.nan)
-        v[:min(n, len(values))] = np.asarray(values, dtype=np.float64)[:n]
+        vals = np.asarray(values, dtype=np.float64)[i0:i0 + n]
+        v[:len(vals)] = vals
         return v
 
     nm = lambda c: (display_names or {}).get(c, c)
 
-    def page(pdf, a, b, balance):
-        m_u = unres.matrix(balance=balance).fetch(a, b).astype(np.float64)
-        m_r = res.matrix(balance=balance).fetch(a, b).astype(np.float64)
-        raw_u = m_u if not balance else unres.matrix(balance=False).fetch(a, b)
-        raw_r = m_r if not balance else res.matrix(balance=False).fetch(a, b)
+    rm_colors = {"LINE": "#2a78d6", "SINE": "#eb6834", "LTR": "#1baf7a", "DNA": "#eda100",
+                 "Satellite": "#e87ba4", "Simple": "#008300", "other": "#b4b2a9"}
+
+    def draw_annotation(ax, kind, chrom, span):
+        """Genes (codants: black, lncRNA / other: grey; names if few) or repeats (RepeatMasker
+        classes on the upper lane, CenSat satellites with their own colours below)."""
+        lo, hi = span
+        if kind == "genes":
+            g = annotations.get("genes")
+            g = g[(g.chrom == chrom) & (g.end > lo) & (g.start < hi)] if g is not None else g
+            ax.set_ylim(-0.6, 3.2)
+            if g is None or g.empty:
+                return
+            g = g.sort_values("start")
+            lanes, ends = [], [-1e18] * 3
+            for st_, en_ in zip(g.start, g.end):          # 3 lanes, greedy packing
+                k = next((i for i in range(3) if st_ > ends[i] + 0.02 * (hi - lo)), 2)
+                ends[k] = max(ends[k], en_)
+                lanes.append(k)
+            g = g.assign(lane=lanes)
+            coding = g.biotype == "protein_coding"
+            for (_, r), cod in zip(g.iterrows(), coding):
+                y = 2.5 - r.lane
+                ax.plot([r.start / 1e3, r.end / 1e3], [y, y], color="black" if cod else "#9a9a96",
+                        lw=2.2 if cod else 1.2, solid_capstyle="butt")
+            lab = g[coding].assign(L=lambda t: t.end - t.start).nlargest(14, "L")
+            for _, r in lab.iterrows():
+                ax.text(max(r.start, lo) / 1e3, 2.5 - r.lane + 0.28, r["name"], fontsize=4.5,
+                        va="bottom", ha="left", clip_on=True)
+            return
+        rmk = annotations.get("repeats")
+        cs = annotations.get("censat")
+        ax.set_ylim(0, 2)
+        if rmk is not None:
+            r = rmk[(rmk.chrom == chrom) & (rmk.end > lo) & (rmk.start < hi)]
+            for cls, sub in r.groupby("cls"):
+                ax.broken_barh(list(zip(sub.start / 1e3, (sub.end - sub.start) / 1e3)), (1.1, 0.8),
+                               color=rm_colors.get(cls, rm_colors["other"]), lw=0)
+            for k_, (cls, col_) in enumerate(rm_colors.items()):
+                ax.plot([], [], color=col_, lw=4, label=cls)
+            ax.legend(fontsize=4.5, loc="upper left", bbox_to_anchor=(1.01, 1.15), frameon=False,
+                      handlelength=1)
+        if cs is not None:
+            c_ = cs[(cs.chrom == chrom) & (cs.end > lo) & (cs.start < hi)]
+            for _, r in c_.iterrows():
+                rgb = tuple(int(v) / 255 for v in str(r.rgb).split(","))
+                ax.broken_barh([(r.start / 1e3, (r.end - r.start) / 1e3)], (0.1, 0.8), color=rgb, lw=0)
+                if (r.end - r.start) > 0.08 * (hi - lo):
+                    ax.text((max(r.start, lo) + min(r.end, hi)) / 2e3, 0.5, str(r["name"]).split("(")[0],
+                            fontsize=4.5, ha="center", va="center", clip_on=True)
+
+    def page(pdf, a, b, balance, region=None):
+        fa = fb = (a, int(region[0]), int(region[1])) if region else None
+        fa, fb = (fa, fb) if region else (a, b)
+        i0 = int(region[0]) // unres.binsize if region else 0
+        m_u = unres.matrix(balance=balance).fetch(fa, fb).astype(np.float64)
+        m_r = res.matrix(balance=balance).fetch(fa, fb).astype(np.float64)
+        raw_u = m_u if not balance else unres.matrix(balance=False).fetch(fa, fb)
+        raw_r = m_r if not balance else res.matrix(balance=False).fetch(fa, fb)
         cov_u, cov_r = raw_u.sum(axis=0), raw_r.sum(axis=0)
+        if region:
+            # windows: genome-wide coverage of each bin (all its contacts, cis and trans), not
+            # only the contacts inside the window (that one drops at the window edges)
+            lo, hi = unres.extent(fb)
+            cov_u = np.asarray(unres.matrix(balance=False, sparse=True)[lo:hi, :].sum(axis=1)).ravel()
+            cov_r = np.asarray(res.matrix(balance=False, sparse=True)[lo:hi, :].sum(axis=1)).ravel()
         # number of contacts (pairs) in each block: upper triangle + diagonal in intra
         n_contacts = [int(np.triu(m).sum()) if a == b else int(m.sum()) for m in (raw_u, raw_r)]
         med = np.median(cov_u)
         nb = m_u.shape[1]
-        x = (np.arange(nb) + 0.5) * kb
+        x = (np.arange(nb) + 0.5 + i0) * kb
         with np.errstate(divide="ignore", invalid="ignore"):
             z_u, z_r = np.log10(m_u), np.log10(m_r)
         # colour scale shared by the two maps of a page, from the non-zero pixels
@@ -564,12 +632,25 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
             empty = np.mean(np.concatenate(seen) == 0) if sum(x.size for x in seen) else 0.0
             vmin = vmin_raw if (vmin_raw is not None and not balance) else \
                 np.percentile(finite, 1) - 0.5 * empty
-            vmax = vmax_raw if (vmax_raw is not None and not balance) else np.percentile(finite, 99.97)
+            vmax = vmax_raw if (vmax_raw is not None and not balance) else \
+                np.percentile(finite, 99.5 if region else 99.97)
         elif balance:
             vmin, vmax = np.percentile(finite, [5, 99])
         else:                                               # trans: far fewer contacts per pixel
             vmin, vmax = 0.0, max(np.percentile(finite, 99.5), 0.5)
 
+        cmap_page = cmap
+        if region:
+            # windows: zero-contact pixels stay white; every pixel with >= 1 contact is coloured
+            # (scale down to the smallest non-zero value, palette starting pale yellow, not white)
+            # so that the sparse far range is not lost in white
+            from matplotlib.colors import LinearSegmentedColormap
+            cmap_page = LinearSegmentedColormap.from_list(
+                "afmhot_r_pale", cmap(np.linspace(0.07, 1.0, 256)))
+            cmap_page.set_bad("white")
+            vmin = float(finite.min())
+            for z in (z_u, z_r):
+                z[np.isneginf(z)] = np.nan          # zero contacts: white (opaque_imshow "bad")
         # fixed layout (inches): real proportions, tracks as wide as their map
         side = 5.0
         h_map = float(np.clip(side * m_u.shape[0] / nb, 0.3 * side, 1.6 * side))
@@ -580,22 +661,27 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
             left += arc_w + 0.1
             if a != b:                                  # strip above the left map
                 top += arc_h + 0.1
-        n_tracks = 2                    # left: GC, mappability; right: coverage before / after, sites (or GC)
+        n_tracks = 3 if (annotations and region) else 2   # (+ genes / repeats in the windows)
         t_h2 = 0.55                     # height of the 2nd tracks (mappability, sites)
+        if region:                      # windows: larger maps, compact tracks
+            side, t_h, t_h2, vgap = 6.0, 0.5, 0.35, 0.22
+            h_map = float(np.clip(side * m_u.shape[0] / nb, 0.3 * side, 1.6 * side))
         fig_w = left + 2 * side + gap + right
         fig_h = bottom + n_tracks * (t_h + vgap) + h_map + top
         fig = plt.figure(figsize=(fig_w, fig_h))
         frac = lambda x0, y0, w, h: [x0 / fig_w, y0 / fig_h, w / fig_w, h / fig_h]
         map_y = bottom + n_tracks * (t_h + vgap)
-        extent = (0, nb * kb, m_u.shape[0] * kb, 0)
+        extent = (i0 * kb, (i0 + nb) * kb, (i0 + m_u.shape[0]) * kb, i0 * kb)
         kind = "normalised (ICE)" if balance else "raw"
 
         for col, (lab, z) in enumerate(((labels[0], z_u), (labels[1], z_r))):
             x0 = left + col * (side + gap)
             ax = fig.add_axes(frac(x0, map_y, side, h_map))
-            im = opaque_imshow(ax, z, cmap, vmin, vmax, bad="white", extent=extent, aspect="auto")
+            im = opaque_imshow(ax, z, cmap_page, vmin, vmax, bad="white", extent=extent, aspect="auto")
             pad = 6 + (72 * (arc_h + 0.1) if arcs is not None and a != b else 0)
-            ax.set_title(f"{lab} — {nm(a)} × {nm(b)} — {kind}, {kb:g} kb bins\n"
+            where = (f"{nm(a)}:{region[0] / 1e6:g}-{region[1] / 1e6:g} Mb" if region
+                     else f"{nm(a)} × {nm(b)}")
+            ax.set_title(f"{lab} — {where} — {kind}, {kb:g} kb bins\n"
                          f"{n_contacts[col]:,} contacts", fontsize=9, pad=pad)
             ax.set_ylabel(f"{nm(a)} (kb)", fontsize=8)
             ax.tick_params(labelbottom=False, labelsize=7)
@@ -609,25 +695,38 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                     draw_links_trans(top_ax, arcs)
 
             tracks = []
-            rs = track(sites.get(b) if sites else None, nb)
-            g = track(gc.get(b) if gc else None, nb)
+            rs = track(sites.get(b) if sites else None, nb, i0)
+            g = track(gc.get(b) if gc else None, nb, i0)
             if col == 0:                        # left: GC content, then mappability (shorter)
                 if g is not None:
                     tracks.append(("GC content", [(g, "orange", None)], None))
-                mapp = track(mappability.get(b) if mappability else None, nb)
+                mapp = track(mappability.get(b) if mappability else None, nb, i0)
                 if mapp is not None:
                     tracks.append(("Mappability", [(mapp, "grey", "fill")], None))
             else:                               # right: coverage, then sites (or GC)
-                tracks.append(("Coverage before / after",
+                tracks.append(("Coverage (genome) before / after" if region else "Coverage before / after",
                                [(cov_u, "royalblue", "before"), (cov_r, "limegreen", "after")], med))
                 if rs is not None:
                     tracks.append((enzyme_label, [(rs, "royalblue", "bar")], None))
                 elif g is not None:
                     tracks.append(("GC content", [(g, "orange", None)], None))
+            if annotations and region:
+                tracks.append(("Genes", [(None, None, "genes")], None) if col == 0 else
+                              ("Repeats / satellites", [(None, None, "repeats")], None))
             for k, (title, series, median) in enumerate(tracks):
                 h = t_h2 if k == 1 else t_h      # 2nd track shorter (mappability / sites)
-                y0 = map_y - k * (t_h + vgap) - vgap - h
+                y0 = map_y - k * (t_h + vgap) - (vgap - (0.15 if k == 2 else 0)) - h
                 tr = fig.add_axes(frac(x0, y0, side, h), sharex=ax)
+                if series[0][2] in ("genes", "repeats"):
+                    draw_annotation(tr, series[0][2], a, (i0 * kb * 1000, (i0 + nb) * kb * 1000))
+                    tr.set_ylabel(title.replace(" / ", "\n"), fontsize=6.5)
+                    tr.set_xlim(extent[0], extent[1])
+                    tr.tick_params(labelsize=6, left=False, labelleft=False,
+                                   labelbottom=(k == len(tracks) - 1))
+                    tr.spines[["top", "right", "left"]].set_visible(False)
+                    if k == len(tracks) - 1:
+                        tr.set_xlabel(f"{nm(b)} (kb)", fontsize=8)
+                    continue
                 for values, color, label in series:
                     if label == "fill":
                         tr.fill_between(x, values, step="mid", color=color, alpha=0.6, lw=0)
@@ -640,7 +739,8 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                     tr.axhline(median, color="black", ls="--", lw=0.8)
                 if any(lbl for _, _, lbl in series if lbl not in (None, "fill", "bar")):
                     tr.legend(fontsize=6, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False)
-                tr.set_ylabel(title, fontsize=7)
+                import textwrap
+                tr.set_ylabel(textwrap.fill(title.replace(",", ", "), 13), fontsize=6.5)
                 tr.spines[["top", "right"]].set_visible(False)
                 tr.tick_params(labelsize=6, labelbottom=(k == len(tracks) - 1))
                 tr.set_xlim(extent[0], extent[1])
@@ -651,6 +751,10 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
 
     for balance, name in ((False, "matrices_raw.pdf"), (True, "matrices_normalised.pdf")):
         with PdfPages(output_dir / name) as pdf:
-            for a, b in chrom_pairs:
-                page(pdf, a, b, balance)
+            if regions:
+                for c, st_, en_ in regions:
+                    page(pdf, c, c, balance, (st_, min(en_, unres.chromsizes[c])))
+            else:
+                for a, b in chrom_pairs:
+                    page(pdf, a, b, balance)
     return [output_dir / "matrices_raw.pdf", output_dir / "matrices_normalised.pdf"]

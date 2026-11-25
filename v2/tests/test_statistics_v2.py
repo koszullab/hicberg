@@ -245,3 +245,65 @@ def test_generate_xs_linear_then_log():
     assert xs[0] == 0 and xs[1] == 2 and np.all(np.diff(xs[xs <= 1000]) == 2)
     assert xs[-1] == st.generate_xs(100_000, 1.1)[-1]           # same log bins beyond
     assert np.all(np.diff(xs) > 0)
+
+
+def test_effective_mappability_curve_recovers_convex_law():
+    # coverage of a bin ∝ f² (not f): the calibrated curve finds it, non-decreasing, e(1) = 1
+    rng = np.random.default_rng(0)
+    n = 20000
+    f = np.where(rng.random(n) < 0.6, 1.0, rng.random(n))
+    raw = rng.poisson(200 * f ** 2).astype(float)
+    x, e = st.effective_mappability_curve({"c": raw}, {"c": f}, {"c": n * 2000}, 2000)
+    assert np.all(np.diff(e) >= 0) and e[0] == 0 and e[-1] == 1
+    for q in (0.3, 0.5, 0.8):
+        assert np.interp(q, x, e) == pytest.approx(q ** 2, abs=0.04)
+
+
+def test_effective_mappability_curve_identity_without_data():
+    x, e = st.effective_mappability_curve({}, {}, {}, 2000)
+    np.testing.assert_allclose(np.interp([0.2, 0.7], x, e), [0.2, 0.7])
+
+
+def test_local_coverage_ratios_relative_to_full_neighbours():
+    # fully mappable bins at 100 reads, half-mappable bins at 30: ratios 1 and 0.3; last bin left out
+    f = np.tile([1.0, 0.5], 100)
+    raw = np.where(f == 1.0, 100.0, 30.0)
+    r, ff = st.local_coverage_ratios({"c": raw}, {"c": f}, {"c": 400_000})
+    assert len(r) == len(f) - 1
+    np.testing.assert_allclose(r[ff == 1.0], 1.0)
+    np.testing.assert_allclose(r[ff == 0.5], 0.3)
+    r, _ = st.local_coverage_ratios({"c": raw}, {"c": f}, {"c": 100_000})   # too short
+    assert len(r) == 0
+
+
+def test_plot_effective_mappability(tmp_path):
+    import plots_v2 as pl
+    rng = np.random.default_rng(0)
+    n = 5000
+    f = np.where(rng.random(n) < 0.6, 1.0, rng.random(n))
+    raw = rng.poisson(200 * f ** 2).astype(float)
+    sizes = {"c": n * 2000}
+    np.save(tmp_path / "coverage1.npy", {"c": raw})
+    np.save(tmp_path / "mappability.npy", {"c": f})
+    np.save(tmp_path / "chromosome_sizes.npy", sizes)
+    assert not pl.plot_effective_mappability(tmp_path, tmp_path / "e.pdf")   # no curve yet
+    x, e = st.effective_mappability_curve({"c": raw}, {"c": f}, sizes, 2000)
+    (tmp_path / "effective_mappability.tsv").write_text(
+        "f\teffective\n" + "".join(f"{a:.4f}\t{b:.4f}\n" for a, b in zip(x, e)))
+    assert pl.plot_effective_mappability(tmp_path, tmp_path / "e.pdf")
+    assert (tmp_path / "e.pdf").stat().st_size > 0
+
+
+def test_correct_coverage_context_drops_isolated_islands():
+    n = 200
+    f = np.ones(n)
+    f[80:120] = 0.0
+    f[100] = 1.0                                   # mappable island inside an unmappable array
+    raw = np.full(n, 100.0)
+    raw[100] = 20.0                                # with a low coverage
+    _, kept0 = st.correct_coverage(raw, f, n * 2000, 2000, min_fraction=0.9)
+    cov, kept = st.correct_coverage(raw, f, n * 2000, 2000, min_fraction=0.9, context_bins=10,
+                                    context_fraction=0.8)
+    assert kept0[100] and not kept[100]            # the island is interpolated
+    assert kept[50] and kept[150]                  # well mappable bins stay
+    np.testing.assert_allclose(cov[100], 100.0)    # from the flanks, not 20

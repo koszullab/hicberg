@@ -112,6 +112,26 @@ def test_unbiased_bad_bins_filled():
     np.testing.assert_allclose(d, 1.0)
 
 
+def test_masked_bins_neutral_not_extrapolated():
+    # a masked band (no unique data, e.g. a satellite array) between flanks depleted relative to
+    # the rest of the chromosome: the smoothing used to extrapolate the flank value (< 1) into
+    # the band while the diagonal was forced to 1; the band must now be neutral (1)
+    n = 100
+    k = np.arange(n)
+    d = np.abs(np.subtract.outer(k, k))
+    f = np.where((k >= 30) & (k < 70), 0.4, 1.0)
+    rng = np.random.default_rng(0)
+    mat = rng.poisson(2000.0 / (1 + d) * np.where(d > 0, np.outer(f, f), 1.0)).astype(float)
+    mat[40:60, :] = np.nan
+    mat[:, 40:60] = np.nan
+    out = dn.block_density(mat, intra=True, method="unbiased", smoothing="gaussian", n_min=50,
+                           masked="neutral")
+    np.testing.assert_allclose(out[40:60, :], 1.0)
+    np.testing.assert_allclose(out[:, 40:60], 1.0)
+    assert np.median(out[30:40, 0:20]) < 0.85         # the flanks keep their measured depletion
+    assert np.isfinite(out).all()
+
+
 def test_block_density_neutral_on_uniform_matrix():
     mat = np.full((30, 30), 5.0)
     d = dn.block_density(mat, intra=True, patch_small=3, patch_large=5)
@@ -277,3 +297,48 @@ def test_cap_outlier_pixels():
     assert out[0, 0] == 20                      # jackpot: capped
     assert out[1, 0] == 300                     # near diagonal: 300 < 100 x 5
     assert out[1, 1] == 15 and out[0, 1] == 1   # below the absolute cap
+
+
+def test_contact_matrix_min_cis_distance(tmp_path):
+    p = tmp_path / "u.pairs"
+    p.write_text("## pairs format v1.0\n#columns: readID chr1 pos1 chr2 pos2 strand1 strand2\n"
+                 "a\tchrA\t1000\tchrA\t1500\t+\t-\n"      # 500 bp: left out
+                 "b\tchrA\t1000\tchrA\t9000\t+\t-\n"      # 8 kb: kept
+                 "c\tchrA\t1000\tchrB\t1200\t+\t-\n")     # trans: kept
+    sizes = {"chrA": 20000, "chrB": 20000}
+    full = dn.contact_matrix(p, sizes, 2000)
+    cut = dn.contact_matrix(p, sizes, 2000, min_cis_distance=5000)
+    assert full.sum() - full.diagonal().sum() / 2 > cut.sum() - cut.diagonal().sum() / 2
+    assert cut[0, 0] == 0 and cut[0, 4] == 1 and cut[0, 10] == 1
+
+
+def test_block_density_informative_diagonal():
+    n = 40
+    k = np.arange(n)
+    mat = (1000.0 / (1 + np.abs(np.subtract.outer(k, k)))).copy()
+    mat[np.arange(10), np.arange(10)] *= 3                  # a compact domain on the diagonal
+    one = dn.block_density(mat, intra=True, method="unbiased", smoothing="gaussian", n_min=50)
+    inf = dn.block_density(mat, intra=True, method="unbiased", smoothing="gaussian", n_min=50,
+                           diag="informative")
+    np.testing.assert_allclose(np.diag(one), 1.0)
+    assert np.diag(inf)[:10].mean() > np.diag(inf)[20:].mean()
+
+
+def test_fill_masked_by_diagonal_follows_the_distance():
+    # density decreasing with the distance, a masked band: the band takes, at each distance,
+    # the value of the flanks at that distance (no isotropic blob)
+    n = 30
+    k = np.arange(n)
+    d = np.abs(np.subtract.outer(k, k))
+    z = 2.0 / (1 + d)
+    bad = np.zeros(n, bool)
+    bad[10:20] = True
+    zz = z.copy()
+    zz[10:20, :] = 99.0
+    zz[:, 10:20] = 99.0
+    out = dn.fill_masked_by_diagonal(zz, bad)
+    full = np.array([(~bad[:n - k] | False).any() and (~(bad[:n - k] | bad[k:])).any() for k in range(n)])
+    keep = full[d]                                       # diagonals with measured pixels: exact
+    np.testing.assert_allclose(out[keep], z[keep])
+    np.testing.assert_allclose(out[~keep], z[~keep], rtol=0.05)   # fully masked diagonal (d = 10):
+    np.testing.assert_allclose(out, out.T)                         # mean of its neighbours

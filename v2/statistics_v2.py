@@ -53,6 +53,9 @@ COVERAGE       = "coverage.npy"    # smoothed
 PS_COUNTS      = "ps_counts.npz"   # raw counts, 4 orientations (QC)
 MAPPABILITY    = "mappability.npy" # fraction of mappable positions per coverage bin
 COVERAGE_KEPT  = "coverage_kept.npy"  # coverage bins used (others interpolated)
+MAPPABILITY_EFF = "mappability_effective.npy"  # effective mappability e(f) per coverage bin
+EFF_CURVE      = "effective_mappability.tsv"  # calibrated curve f -> e(f)
+DENSITY_MIN_DIST = "density_min_distance.npy"  # cis pairs closer than this: density 1 (P(s) only)
 DENSITY_MAP    = "density_map.npy"    # 2D density (density_v2), float32
 DENSITY_BIN    = "density_bin_size.npy"  # bin size of the density (may differ from bin_size)
 DENSITY_MASK   = "density_mask.npy"   # {chrom: (bad bins, mappable weights)} at the density bin
@@ -462,9 +465,90 @@ def compute_trans_ps(acc, lengths=None):
     return trans_ps
 
 
+def local_coverage_ratios(raw, fraction, chrom_sizes, min_length=200_000, cap=5.0, window=25,
+                          min_full=5):
+    """
+    Data of the effective-mappability calibration: for each coverage bin of a sequence
+    >= min_length (last, shorter bin left out) with >= min_full fully mappable bins (f >= 0.99)
+    within +-window bins, r = raw coverage / mean raw coverage of these bins (capped at `cap`).
+    Returns (r, f) as two flat arrays (empty if no data).
+    """
+    from scipy.ndimage import uniform_filter1d
+    R, F = [], []
+    for c, L in chrom_sizes.items():
+        if L < min_length or c not in raw or c not in fraction:
+            continue
+        r = np.asarray(raw[c], np.float64)[:-1]
+        f = np.zeros(len(r))
+        n = min(len(r), len(fraction[c]))
+        f[:n] = np.asarray(fraction[c], np.float64)[:n]
+        full = (f >= 0.99).astype(np.float64)
+        size = 2 * window + 1
+        tot = uniform_filter1d(r * full, size, mode="constant") * size
+        cnt = uniform_filter1d(full, size, mode="constant") * size
+        ok = (cnt >= min_full - 1e-6) & (tot > 0)
+        if not ok.any():
+            continue
+        R.append(np.minimum(r[ok] / (tot[ok] / cnt[ok]), cap))
+        F.append(f[ok])
+    if not R:
+        return np.zeros(0), np.zeros(0)
+    return np.concatenate(R), np.concatenate(F)
+
+
+def effective_mappability_curve(raw, fraction, chrom_sizes, bin_size, min_length=200_000,
+                                step=0.05, min_bins=20, cap=5.0, window=25, min_full=5):
+    """
+    Effective mappability e(f): observed coverage of a coverage bin relative to the fully
+    mappable bins, as a function of its mappable fraction f (bedgraph), calibrated on the run.
+    The bedgraph overestimates what our reads can map (human: f = 0.28 → e = 0.06; reads
+    shorter than the k of the track after the chimera split, MAPQ >= 30, bins next to repeats),
+    so a coverage divided by f is biased low in the partially mappable bins (and the expected
+    of the density, weighted by f, biased high). Local reference, so that the regional biology
+    (repeat-rich regions are often heterochromatin) is not mixed with the mappability: per
+    sequence >= min_length (last, shorter bin left out), r = raw / mean raw of the fully
+    mappable bins (f >= 0.99) within +-window bins (>= min_full of them; capped at `cap`).
+    Human: local e(0.2) / 0.2 = 0.40, against 0.23 with a chromosome-wide reference. Mean r per
+    class of f (width `step`, >= min_bins bins); made non-decreasing (pool-adjacent-violators,
+    weighted by the bins), scaled to 1 in the top class; (0, 0) and (1, 1) added.
+    Returns (f grid, e) for np.interp; the identity if too few data.
+    """
+    R, F = local_coverage_ratios(raw, fraction, chrom_sizes, min_length, cap, window, min_full)
+    if len(R) == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+    edges = np.arange(0, 1 + step / 2, step)
+    k = np.clip(np.digitize(F, edges[1:-1]), 0, len(edges) - 2)
+    x, y, w = [], [], []
+    for i in range(len(edges) - 1):
+        s = k == i
+        if s.sum() >= min_bins:
+            x.append(F[s].mean())
+            y.append(R[s].mean())
+            w.append(float(s.sum()))
+    if len(x) < 2:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+    # pool-adjacent-violators: non-decreasing fit
+    blocks = [[yy, ww, 1] for yy, ww in zip(y, w)]
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i][0] > blocks[i + 1][0]:
+            a, b = blocks[i], blocks[i + 1]
+            tw = a[1] + b[1]
+            blocks[i] = [(a[0] * a[1] + b[0] * b[1]) / tw, tw, a[2] + b[2]]
+            del blocks[i + 1]
+            i = max(i - 1, 0)
+        else:
+            i += 1
+    fit = np.concatenate([[b[0]] * b[2] for b in blocks])
+    fit = fit / fit[-1] if fit[-1] > 0 else fit
+    x = np.concatenate([[0.0], x, [1.0]])
+    e = np.clip(np.concatenate([[0.0], fit, [1.0]]), 0, 1)
+    return x, np.maximum.accumulate(e)
+
+
 def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.3,
                      min_mappable_bp=100, min_ratio=0.0, window=10, circular=False,
-                     min_anchor_bp=None):
+                     min_anchor_bp=None, keep_fraction=None, context_bins=0, context_fraction=0.8):
     """
     Coverage corrected by mappability, expressed per bin_size bp:
       1. mappable length of each bin = fraction × effective width (the last
@@ -484,6 +568,13 @@ def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.3,
          used as anchors: a short valid bin at a chromosome end keeps its own
          value but does not impose its slope on the bins upstream (end of
          chrI: one 490-bp bin was pulling 26 kb of interpolated coverage down)
+    keep_fraction: if given, the bins are kept on keep_fraction >= min_fraction (the bedgraph
+    mappable fraction) while `fraction` (the effective mappability) normalises them.
+    context_bins > 0: a bin is kept only if >= context_fraction of the bins within +-context_bins
+    pass the fraction threshold too: isolated mappable islands inside the satellite arrays have a
+    low coverage and were the anchors of the interpolated arrays (human pilot, anchors of the gaps
+    >= 500 kb: 0.41 x the median with f >= 0.9 alone, 0.82 with 80 % of +-100 kb; 2 % of the kept
+    bins removed).
     Returns (corrected, valid) with valid = bins kept (not interpolated). If no
     bin is valid, corrected is NaN everywhere (to be filled by the caller).
     """
@@ -494,7 +585,17 @@ def correct_coverage(raw, fraction, chrom_size, bin_size, min_fraction=0.3,
     widths = np.clip(chrom_size - np.arange(len(raw)) * bin_size, 0, bin_size)
     mappable = f * widths
 
-    valid = (f >= min_fraction) & (mappable >= max(min_mappable_bp, 1e-9))
+    fk = f
+    if keep_fraction is not None:
+        fk = np.zeros(len(raw))
+        fk[:min(len(raw), len(keep_fraction))] = np.asarray(keep_fraction)[:len(raw)]
+    passes = fk >= min_fraction
+    valid = passes & (mappable >= max(min_mappable_bp, 1e-9))
+    if context_bins > 0 and len(raw) > 1:
+        from scipy.ndimage import uniform_filter1d
+        ctx = uniform_filter1d(passes.astype(np.float64), 2 * int(context_bins) + 1,
+                               mode="wrap" if circular else "nearest")
+        valid &= ctx >= context_fraction
     corrected = np.full(len(raw), np.nan)
     corrected[valid] = raw[valid] * bin_size / mappable[valid]
 
@@ -560,7 +661,7 @@ def fill_from_all_reads(acc, final, kept, mappability, all_reads):
     return final
 
 
-def compute_coverages(acc, smooth=True, mappability=None, all_reads=None, **correction):
+def compute_coverages(acc, smooth=True, mappability=None, all_reads=None, keep_by=None, **correction):
     """
     Returns (raw, final, kept) coverages per chromosome.
       - mappability = {chrom: fraction of mappable positions per coverage
@@ -579,7 +680,8 @@ def compute_coverages(acc, smooth=True, mappability=None, all_reads=None, **corr
         for i, (chrom, y) in enumerate(raw.items()):
             final[chrom], kept[chrom] = correct_coverage(
                 y, mappability[chrom], acc.sizes[i], acc.bin_size,
-                circular=acc.circular[i], **correction)
+                circular=acc.circular[i], keep_fraction=None if keep_by is None else keep_by[chrom],
+                **correction)
             if not kept[chrom].any():
                 empty.append(chrom)
         if all_reads is not None:
@@ -621,11 +723,13 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         ps_smoothing="pool", ps_min_pairs=100, ps_merge_distance=5000,
                         ps_pool_distance=1000,
                         plots=True, mappability=None, map_resolution=100,
-                        min_mappability=1.0, coverage_min_fraction=0.3,
+                        min_mappability=1.0, coverage_min_fraction=None, effective_mappability=True,
                         coverage_min_bp=100, coverage_min_ratio=0.0, coverage_all_reads=None,
                         density=True, density_n_min=200, density_n_min_trans=200,
                         density_reproducibility=0.8, density_bin_size=None, plot_chroms=None,
-                        density_refine=True, ps_linear_until=0, ps_linear_step=2):
+                        density_refine=True, ps_linear_until=0, ps_linear_step=2, display_names=None,
+                        density_min_distance=2000, density_masked="interpolate",
+                        coverage_context_kb=100, coverage_context_fraction=0.8):
     """
     Compute and save the statistical laws, then (plots=True) their PDF plots
     in output_dir/plots, to be checked before running the re-attribution.
@@ -670,6 +774,26 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                   f"(considered unmappable): {missing}")
         map_fine   = binned_unique_fraction(bg, chrom_sizes, map_resolution, min_mappability)
         map_coarse = binned_unique_fraction(bg, chrom_sizes, bin_size, min_mappability)
+    map_eff = eff_curve = None
+    if map_coarse is not None and effective_mappability:
+        eff_curve = effective_mappability_curve(acc.coverage_by_chrom(), map_coarse, chrom_sizes,
+                                                bin_size)
+        map_eff = {c: np.interp(v, *eff_curve) for c, v in map_coarse.items()}
+        gx, ge = eff_curve
+        print("  effective mappability (coverage vs mappable fraction f, local reference, calibrated "
+              "on the run): " + "  ".join(f"e({q})={np.interp(q, gx, ge):.2f}" for q in (0.2, 0.4, 0.6, 0.8, 0.9)))
+        # P(s) areas and trans lengths: each fine position weighted by e(f) / f of its coverage
+        # bin (human: P(s) +2-7 %, nearly uniform in s)
+        if bin_size % map_resolution == 0:
+            k = bin_size // map_resolution
+            for c in map_fine:
+                fc = np.asarray(map_coarse[c], np.float64)
+                ratio = np.where(fc > 0, map_eff[c] / np.maximum(fc, 1e-12), 0.0)
+                rf = np.repeat(ratio, k)
+                m = np.asarray(map_fine[c], np.float64)
+                rf = np.concatenate([rf, np.full(max(0, len(m) - len(rf)), rf[-1] if len(rf) else 1.0)])
+                map_fine[c] = np.minimum(m * rf[:len(m)], 1.0)
+    if map_fine is not None:
         map_lengths = {c: mappable_length(map_fine[c], L, map_resolution)
                        for c, L in chrom_sizes.items()}
 
@@ -679,9 +803,20 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                                                ps_min_pairs, ps_merge_distance, ps_pool_distance)
     print("Computing trans P(s) ...")
     trans_ps = compute_trans_ps(acc, map_lengths)
+    if coverage_min_fraction is None:
+        # bins kept on their bedgraph mappable fraction f; with the effective mappability the
+        # corrected coverage is only unbiased for nearly fully mappable bins (human: median
+        # corrected / median 0.61 at e 0.2-0.3, 0.77 at 0.4-0.5, 0.91 at 0.6-0.7 (f ~0.9), 1.00
+        # above), and the poorly mappable bins next to the repeats were the anchors of the
+        # interpolated arrays (chr1 HSat2 interpolated at 0.4 x the median); low-mappability
+        # genomes (mosquito: 76 % of the bins partially mappable) may need e.g. 0.3
+        coverage_min_fraction = 0.9 if map_eff is not None else 0.3
     print("Computing coverages ...")
     cov_raw, cov_smooth, cov_kept = compute_coverages(
-        acc, smooth, map_coarse, all_reads=coverage_all_reads, min_fraction=coverage_min_fraction,
+        acc, smooth, map_eff if map_eff is not None else map_coarse, all_reads=coverage_all_reads,
+        keep_by=map_coarse if map_eff is not None else None, min_fraction=coverage_min_fraction,
+        context_bins=int(round(coverage_context_kb * 1000 / bin_size)),
+        context_fraction=coverage_context_fraction,
         min_mappable_bp=coverage_min_bp, min_ratio=coverage_min_ratio)
 
     np.save(output_dir / XS,           acc.xs)
@@ -697,6 +832,12 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                         **{c: v for c, v in acc.ps_counts_by_chrom().items()})
     if map_coarse is not None:
         np.save(output_dir / MAPPABILITY, map_coarse)
+    (output_dir / MAPPABILITY_EFF).unlink(missing_ok=True)
+    (output_dir / EFF_CURVE).unlink(missing_ok=True)
+    if map_eff is not None:
+        np.save(output_dir / MAPPABILITY_EFF, map_eff)
+        (output_dir / EFF_CURVE).write_text("f\teffective\n" + "".join(
+            f"{a:.4f}\t{b:.4f}\n" for a, b in zip(*eff_curve)))
     if cov_kept is not None:
         np.save(output_dir / COVERAGE_KEPT, cov_kept)
 
@@ -717,7 +858,12 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         db = int(density_bin_size or bin_size)
         print(f"Computing density map ({db / 1000:g} kb bins) ...")
         auto = density_n_min == "auto"
-        result = dn.contact_matrix(pairs_path, chrom_sizes, db, chunksize, split_halves=auto)
+        # the cis pairs closer than density_min_distance are left out of the density (described
+        # by P(s) by orientation; the re-attribution uses density 1 below that distance), so its
+        # diagonal is informative (not forced to 1); masked bins interpolated (density_masked)
+        diag = "informative" if density_min_distance > 0 else "one"
+        result = dn.contact_matrix(pairs_path, chrom_sizes, db, chunksize, split_halves=auto,
+                                   min_cis_distance=density_min_distance)
         matrix, halves = result if auto else (result, None)
         def density_mask(sizes_, db_):
             n_bins_, _ = dn.genome_bins(sizes_, db_)
@@ -730,7 +876,13 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                     bad_c = np.bincount(idx, weights=k, minlength=n)[:n] == 0
                 else:
                     bad_c = np.zeros(n, dtype=bool)
-                if bg is not None:
+                if map_eff is not None:
+                    # effective mappable length of the coverage bins inside each density bin
+                    e2 = np.asarray(map_eff[c], np.float64)
+                    wid2 = np.clip(L - np.arange(len(e2)) * bin_size, 0, bin_size)
+                    i2 = np.minimum(np.arange(len(e2)) * bin_size // db_, n - 1)
+                    w_c = np.bincount(i2, weights=e2 * wid2, minlength=n)[:n] / db_
+                elif bg is not None:
                     frac_c = binned_unique_fraction({c: bg[c]} if c in bg else {}, {c: L}, db_,
                                                     min_mappability)[c][:n]
                     w_c = frac_c * np.clip(L - np.arange(n) * db_, 0, db_) / db_
@@ -754,8 +906,10 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
             density_n_min, density_n_min_trans = best["intra"], best["trans"]
         maps = dn.density_maps(matrix, chrom_sizes, db, bad, method="unbiased",
                                smoothing="gaussian", n_min=int(density_n_min),
-                               n_min_trans=int(density_n_min_trans), weights=weights)
+                               n_min_trans=int(density_n_min_trans), weights=weights,
+                               masked=density_masked, diag=diag)
         maps = {k: v.astype(np.float32) for k, v in maps.items()}
+        np.save(output_dir / DENSITY_MIN_DIST, int(density_min_distance))
         np.save(output_dir / DENSITY_MAP, maps)
         np.save(output_dir / DENSITY_BIN, db)
         np.save(output_dir / DENSITY_MASK, mask)
@@ -781,10 +935,12 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
                     mask_f = density_mask(sizes_f, db_f)
                     bad_f = np.concatenate([mask_f[c][0] for c in sizes_f]) if cov_kept is not None else None
                     w_f = np.concatenate([mask_f[c][1] for c in sizes_f]) if bg is not None else None
-                    mat_f = dn.contact_matrix(pairs_path, sizes_f, db_f, chunksize)
+                    mat_f = dn.contact_matrix(pairs_path, sizes_f, db_f, chunksize,
+                                              min_cis_distance=density_min_distance)
                     maps_f = dn.density_maps(mat_f, sizes_f, db_f, bad_f, method="unbiased",
                                              smoothing="gaussian", n_min=int(density_n_min),
-                                             n_min_trans=int(density_n_min_trans), weights=w_f)
+                                             n_min_trans=int(density_n_min_trans), weights=w_f,
+                                             masked=density_masked, diag=diag)
                     np.save(output_dir / DENSITY_FINE_MAP, {k: v.astype(np.float32) for k, v in maps_f.items()})
                     np.save(output_dir / DENSITY_FINE_BIN, db_f)
                     np.save(output_dir / DENSITY_FINE_MASK, mask_f)
@@ -814,9 +970,15 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         total, mappable = sum(chrom_sizes.values()), sum(map_lengths.values())
         lines += [
             f"mappability           : {mappability}",
-            f"  resolution / min    : {map_resolution} bp / score >= {min_mappability}",
-            f"  coverage            : raw x {bin_size} / mappable bp; bins kept if fraction >= "
+            f"  resolution / min    : {map_resolution} bp / score >= {min_mappability}"
+            + ("; P(s) areas and trans lengths: positions weighted by e(f) / f of their coverage bin"
+               if map_eff is not None else ""),
+            f"  coverage            : raw x {bin_size} / "
+            f"{'effective mappable bp (e(f) calibrated on the run, ' + EFF_CURVE + ')' if map_eff is not None else 'mappable bp'}"
+            f"; bins kept if mappable fraction f >= "
             f"{coverage_min_fraction}, >= {coverage_min_bp} mappable bp"
+            + (f", >= {coverage_context_fraction:.0%} of the bins within +-{coverage_context_kb:g} kb too"
+               if coverage_context_kb > 0 else "")
             + (f", >= {coverage_min_ratio} x local median" if coverage_min_ratio > 0
                else " (low-coverage bins kept)"),
             "  excluded bins       : " + (f"from all aligned reads ({coverage_all_reads})"
@@ -829,6 +991,10 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         f"{db / 1000:g} kb bins, unbiased, adaptive Gaussian (>= {density_n_min} contacts intra, "
         f">= {density_n_min_trans} trans{f', auto: >= {density_reproducibility:.0%} reproducible' if density_n_min_auto else ''})"
         + (", mappability mask and weights" if map_coarse is not None else "")
+        + (f" (effective mappability)" if map_eff is not None else "")
+        + f", masked bins {density_masked}"
+        + (f", cis pairs < {density_min_distance} bp left out (density held at its diagonal value there), diagonal informative"
+           if density_min_distance > 0 else ", diagonal = 1")
         if density else "-"))
     lines.append(f"time                  : {time.time() - t0:.0f} s")
     (output_dir / "statistics_stats.txt").write_text("\n".join(lines) + "\n")
@@ -836,7 +1002,9 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
 
     # --- Plots: check the laws before re-attribution ---
     if plots:
-        from plots_v2 import plot_all
+        from plots_v2 import plot_all, DISPLAY_NAMES
+        if display_names:
+            np.save(output_dir / DISPLAY_NAMES, dict(display_names))
         print()
         plot_all(output_dir, output_dir / "plots", bin_size=bin_size, plot_chroms=plot_chroms)
         print("→ Check these plots before running the re-attribution step.")
@@ -881,10 +1049,20 @@ def main():
                         help="Resolution of the mappability mask for the P(s) areas (default=100)")
     parser.add_argument("--min_mappability", type=float, default=1.0,
                         help="Min GenMap score of a mappable position (default=1.0 = unique k-mer)")
-    parser.add_argument("--coverage_min_fraction", type=float, default=0.3,
-                        help="Coverage bins kept if their mappable fraction (of their own width) "
-                             "is >= this value, else interpolated (default=0.3; 0.8 excluded 80 %% "
-                             "of the mosquito bins)")
+    parser.add_argument("--coverage_min_fraction", type=float, default=None,
+                        help="Coverage bins kept (not interpolated) if their mappable fraction f "
+                             "(bedgraph) is >= this value; they also define the masked density bins "
+                             "(default 0.9 with the effective mappability, 0.3 without; "
+                             "low-mappability genomes, e.g. mosquito: 0.3)")
+    parser.add_argument("--coverage_context_kb", type=float, default=100,
+                        help="A coverage bin is kept only if >= --coverage_context_fraction of the bins "
+                             "within +- this distance (kb) pass the fraction threshold too: isolated "
+                             "mappable islands inside satellite arrays are interpolated (default 100; 0 = off)")
+    parser.add_argument("--coverage_context_fraction", type=float, default=0.8)
+    parser.add_argument("--no_effective_mappability", action="store_true",
+                        help="Coverage and density weights proportional to the bedgraph mappable "
+                             "fraction (previous behaviour) instead of the effective mappability "
+                             "calibrated on the run (the bedgraph overestimates it: human f 0.28 → 0.06)")
     parser.add_argument("--coverage_min_bp", type=int, default=100,
                         help="... and if they contain >= this number of mappable bp (default=100)")
     parser.add_argument("--coverage_min_ratio", type=float, default=0.0,
@@ -904,6 +1082,15 @@ def main():
     parser.add_argument("--density_bin_size", default=None,
                         help="Bin size of the 2D density (default = --bin_size; 'auto' = from "
                              "the available memory, for large genomes)")
+    parser.add_argument("--density_min_distance", type=int, default=2000,
+                        help="Cis pairs closer than this (bp) are left out of the density (uncuts, "
+                             "self-ligations: the orientations are random from ~1 kb on) and the "
+                             "re-attribution holds the density at its diagonal value below it (P(s) by "
+                             "orientation shapes the short range); the density diagonal is then "
+                             "informative (default 2000; 0 = previous behaviour, diagonal forced to 1)")
+    parser.add_argument("--density_masked", choices=("interpolate", "neutral", "diagonal"), default="interpolate",
+                        help="Density of the masked bins (no unique data): interpolated from the "
+                             "flanks (default) or neutral (1)")
     parser.add_argument("--density_n_min_trans", type=int, default=200,
                         help="Density: min contacts per adaptive window in trans (default=200)")
     parser.add_argument("--coverage_all_reads", default=None,
@@ -930,12 +1117,17 @@ def main():
         map_resolution   = args.map_resolution,
         min_mappability  = args.min_mappability,
         coverage_min_fraction = args.coverage_min_fraction,
+        effective_mappability = not args.no_effective_mappability,
+        coverage_context_kb = args.coverage_context_kb,
+        coverage_context_fraction = args.coverage_context_fraction,
         coverage_min_bp  = args.coverage_min_bp,
         coverage_min_ratio = args.coverage_min_ratio,
         coverage_all_reads = args.coverage_all_reads,
         density          = not args.no_density,
         density_n_min    = args.density_n_min if args.density_n_min == "auto" else int(args.density_n_min),
         density_n_min_trans = args.density_n_min_trans,
+        density_min_distance = args.density_min_distance,
+        density_masked   = args.density_masked,
         density_reproducibility = args.density_reproducibility,
         density_bin_size = (args.density_bin_size if args.density_bin_size in (None, "auto")
                             else int(args.density_bin_size)),
