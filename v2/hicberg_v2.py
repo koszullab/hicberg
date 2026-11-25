@@ -118,7 +118,8 @@ def resolve_chroms(genome, spec):
             out.append(by_display[x])
         else:
             raise ValueError(f"--exclude_chroms: unknown sequence {x}")
-    log(f"Excluded from the re-attribution: {', '.join(f'{c} ({names[c]})' for c in out)}")
+    log(f"Excluded from the analysis (classification, laws, re-attribution, matrices): "
+        f"{', '.join(f'{c} ({names[c]})' for c in out)}")
     return out
 
 
@@ -159,6 +160,11 @@ def main():
                    help="A read with a second alignment (XS) but MAPQ >= this value is unique "
                         "(group1), as the MAPQ filter of hicstuff (default 30; -1 = XS only). "
                         "Also used for the bowtie2 mappability")
+    p.add_argument("--verify_unique", action="store_true",
+                   help="Check the reads unique by MAPQ only (XS present) but poorly aligned (NM >= 4) "
+                        "against the repeat index: ambiguous if a copy as good exists elsewhere. Removes "
+                        "the alignment attractors of the large satellites (human: 2 loci); off by default "
+                        "(parallel pre-pass on both SAM files with --cpus processes, ~+1 h on a full human run)")
     p.add_argument("--min_insert", type=int, default=20,
                    help="Reads whose Illumina adapter starts before this position (adapter dimers, "
                         "tiny inserts) are treated as unmapped (default 20; 0 = off)")
@@ -192,15 +198,46 @@ def main():
                         "K found by bowtie2. 'auto' (default): built once in index/ (human: ~35 min, "
                         "~0.5 GB + the genome as codes on disk); a prefix of an existing index; 'none'")
     p.add_argument("--exclude_chroms", default="",
-                   help="Chromosomes on which no ambiguous read is re-attributed, comma-separated FASTA "
-                        "identifiers or display names (chrY): e.g. chrY for a female sample, whose PAR "
-                        "reads would otherwise be split between chrX and a chrY absent from the cells")
+                   help="Sequences left out of the analysis, comma-separated FASTA identifiers or display "
+                        "names (chrY): pairs with a read aligned to them are dropped at the classification, "
+                        "and they are absent from the laws, the re-attribution and the matrices; e.g. chrY "
+                        "for a female sample, whose PAR reads would otherwise be split between chrX and a "
+                        "chrY absent from the cells")
     p.add_argument("--error_rate", type=float, default=0.01)
     p.add_argument("--as_delta", type=int, default=30)
     p.add_argument("--workers", type=int, default=0,
                    help="Parallel workers (= group2 chunks, set at the classification). 0 (default): --cpus // 4 with bowtie2 candidates (each worker runs bowtie2 on 4 threads); with --candidates index, one single-threaded worker per CPU, limited by the available memory (~2.5 GB per worker + ~5 GB shared, measured on the human genome)")
+    p.add_argument("--max_fallback_nm", type=int, default=None,
+                   help="Index-only mode: a read without any index candidate whose first alignment has "
+                        "NM >= this value is not placed (its pair is unplaced): degraded satellite reads "
+                        "that piled up at a few loci. Default: off (under test, 2026-11-25)")
+    p.add_argument("--requalify_nm", type=int, default=None,
+                   help="Index-only mode: a group2 read unique by MAPQ whose first alignment has NM >= this "
+                        "value is re-examined as ambiguous (its copies from the index compete with its first "
+                        "alignment through the alignment weights). Default: off (under test, 2026-11-25)")
     p.add_argument("--max_combinations", type=int, default=5000,
                    help="Pairs with more candidate combinations are drawn hierarchically (near combinations exact, far ones by importance sampling; indistinguishable from the exact draw on yeast, ~3 ms per pair; 0 = always exact; default 5000)")
+    p.add_argument("--coverage_min_fraction", type=float, default=None,
+                   help="Coverage bins used (not interpolated) if their mappable fraction f (bedgraph) is "
+                        ">= this value; they also define the masked bins of the density (default 0.9 with the "
+                        "effective mappability: partially mappable bins stay biased low; low-mappability "
+                        "genomes, e.g. mosquito: 0.3)")
+    p.add_argument("--density_masked", choices=("interpolate", "diagonal", "neutral"), default="interpolate",
+                   help="2-D density of the masked bins (no unique data): adaptive Gaussian interpolation "
+                        "(default), interpolation along each diagonal in intra (Gaussian in trans; no round "
+                        "shapes in the large unmappable regions), or neutral (1)")
+    p.add_argument("--coverage_context_kb", type=float, default=100,
+                   help="Coverage bins kept only if >= 80 %% of the bins within +- this distance (kb) pass "
+                        "--coverage_min_fraction too: isolated mappable islands inside the satellite arrays "
+                        "are interpolated instead of anchoring them (default 100, chosen on the human pilots "
+                        "2026-11-25; 0 = off)")
+    p.add_argument("--density_min_distance", type=int, default=2000,
+                   help="Cis pairs closer than this (bp) are left out of the 2-D density, whose diagonal is "
+                        "then informative; below it the re-attribution holds the density at its diagonal value "
+                        "(default 2000; 0 = diagonal forced to 1, previous behaviour)")
+    p.add_argument("--no_effective_mappability", action="store_true",
+                   help="Coverage and density weights proportional to the bedgraph mappable fraction "
+                        "(previous behaviour) instead of the effective mappability calibrated on the run")
     p.add_argument("--seed", type=int, default=0)
     # matrices
     p.add_argument("--hicstuff", action="store_true",
@@ -250,6 +287,14 @@ def main():
         chrom_sizes_file.write_text("".join(f"{c}\t{L}\n" for c, L in sizes.items()))
     sizes = {l.split()[0]: int(l.split()[1]) for l in chrom_sizes_file.read_text().splitlines()}
     log(f"{len(sizes)} chromosomes, {sum(sizes.values()):,} bp")
+    # excluded sequences (e.g. chrY of a female sample): left out from the classification on (pairs
+    # with a read aligned to them dropped), so from the laws, the re-attribution and the matrices
+    excluded = resolve_chroms(args.genome, args.exclude_chroms)
+    analysis_sizes_file = chrom_sizes_file
+    if excluded:
+        sizes = {c: L for c, L in sizes.items() if c not in excluded}
+        analysis_sizes_file = out / "chrom.sizes.analysis"
+        analysis_sizes_file.write_text("".join(f"{c}\t{L}\n" for c, L in sizes.items()))
 
     plot_chroms = None
     if run_stage("stats", args) or run_stage("matrices", args):
@@ -367,7 +412,9 @@ def main():
         log("Classifying the pairs ...")
         sc.classify(sam1, sam2, dirs["classifier"], n_cpus=n_chunks,
                     min_mapq=None if args.min_mapq < 0 else args.min_mapq,
-                    dedup_tol=args.dedup_tol, min_insert=args.min_insert)
+                    dedup_tol=args.dedup_tol, min_insert=args.min_insert,
+                    verify_unique=repeat_index_prefix() if (args.verify_unique and not omics) else None,
+                    verify_workers=args.cpus, exclude_chroms=excluded)
         if not args.keep_sam:
             sam1.unlink(missing_ok=True)
             sam2.unlink(missing_ok=True)
@@ -376,7 +423,7 @@ def main():
     if run_stage("stats", args):
         import statistics_v2 as st
         log("Statistical laws ...")
-        st.generate_statistics(dirs["classifier"] / "unrescued.pairs", chrom_sizes_file,
+        st.generate_statistics(dirs["classifier"] / "unrescued.pairs", analysis_sizes_file,
                                dirs["statistics"], bin_size=args.bin_size, circular=args.circular,
                                mappability=bedgraph,
                                density_n_min=args.density_n_min if args.density_n_min == "auto"
@@ -384,7 +431,13 @@ def main():
                                density_bin_size=args.density_bin_size
                                if args.density_bin_size == "auto" else int(args.density_bin_size),
                                plot_chroms=plot_chroms, density=args.mode == "full",
-                               ps_linear_until=args.ps_linear)
+                               ps_linear_until=args.ps_linear,
+                               effective_mappability=not args.no_effective_mappability,
+                               density_min_distance=args.density_min_distance,
+                               coverage_min_fraction=args.coverage_min_fraction,
+                               density_masked=args.density_masked,
+                               coverage_context_kb=args.coverage_context_kb,
+                               display_names=mx.display_names(args.genome))
         if args.exit_stage == "stats":
             log(f"Checkpoint: check {dirs['statistics'] / 'plots'}, then run again with "
                 f"--start_stage rescue")
@@ -400,7 +453,8 @@ def main():
                        repeat_index=None if omics else repeat_index_prefix(),
                        index_only=args.candidates == "index" and not omics,
                        max_combinations=args.max_combinations,
-                       exclude_chroms=resolve_chroms(args.genome, args.exclude_chroms))
+                       exclude_chroms=excluded, max_fallback_nm=args.max_fallback_nm,
+                       requalify_nm=args.requalify_nm)
 
     # --- omics: signal tracks instead of the matrices ---
     if omics and run_stage("matrices", args):
@@ -419,7 +473,18 @@ def main():
         dirs["matrices"].mkdir(exist_ok=True)
         unrescued, rescued = dirs["classifier"] / "unrescued.pairs", dirs["rescue"] / "rescued.pairs"
         suffix = ""
-        if args.hicstuff:
+        done_u = dirs["matrices"] / "hicstuff_unrescued" / "unrescued.valid_idx_filtered_pcrfree.pairs"
+        done_r = dirs["matrices"] / "hicstuff_rescued" / "rescued.valid_idx_filtered_pcrfree.pairs"
+        predicted = dirs["rescue"] / "predicted.pairs"
+        if args.hicstuff and done_u.is_file() and done_r.is_file() \
+                and (done_r.parent / "merge.log").is_file() and predicted.is_file() \
+                and done_u.stat().st_mtime > predicted.stat().st_mtime \
+                and done_r.stat().st_mtime >= done_u.stat().st_mtime:
+            # a previous run stopped after the filtering (e.g. at the matrices): reuse it
+            log(f"hicstuff filtering: reusing {done_u.parent.name} and {done_r.parent.name} "
+                "(newer than predicted.pairs; delete them to filter again)")
+            unrescued, rescued, suffix = done_u, done_r, ".filtered"
+        elif args.hicstuff:
             log("hicstuff filtering (non-informative events, PCR duplicates) ...")
             table = mx.restriction_table(args.genome, args.enzyme)
             unrescued, thresholds = mx.hicstuff_filter(unrescued, args.genome, args.enzyme,

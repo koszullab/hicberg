@@ -1413,3 +1413,439 @@ Follow-up (2026-11-20):
   Note: with the mate far or in trans, P(s) x density already gives 86 % at the true copy on human
   (58 % on yeast).
   Not merged into v2 (the code stays in `~/hicberg/v2_dev`).
+
+### Copies inside the satellite arrays; binned draw of the far combinations (2026-11-20, branch `binned-draw`)
+
+Idea tested: replace the sum of the P(s) weights over the many copies of a satellite read by a
+closed form. If the gaps G_k between consecutive copies are stationary and moreover
+(G1, G2) ~ (min(G1, G2), max(G1, G2)), then G1 <= G2 a.s., hence (stationarity) G_k = G_{k+1}
+a.s.: the only solutions are lattices X_k = X_0 + k G (G random). With a renormalisation one
+gets the min / max-stable families instead (Weibull, GEV; exponential = Poisson when min and
+max - min are independent, Ferguson-Crawford). For a lattice, sum_k (d + kG)^-alpha has a
+closed form (digamma for alpha = 1, Hurwitz zeta otherwise).
+
+Measured on CHM13 (`v2_dev/arrays/array_gaps.py`, outputs `human/array_gaps/`): 207 arrays
+>= 100 kb (2 kb bins where >= 50 % of the minimizer occurrences have >= 1,000 genome copies),
+134 Mb; 40 largest analysed, canonical 31-mers.
+- The copies are on a lattice: 80-100 % of the gaps at a multiple of the period (340 bp alpha
+  dimer, 680-3,500 bp HORs, +-2 %).
+- But each k-mer occupies a clustered subset of the sites: per-k-mer CV of the gaps 1.7-5 in
+  the large arrays (lattice 0, Poisson 1), < 5 % of the k-mers with CV < 0.3 (HOR domains,
+  layered expansions).
+- Sum of g(s) = 1 / (s + 1 kb) over the copies of a k-mer (200 k-mers per array, 229 copies
+  median, up to 11,227), relative error vs exact, median (q90):
+
+| mate | lattice (digamma) | uniform density | 2 kb bins | 10 kb bins | 50 kb bins |
+|---|---|---|---|---|---|
+| inside the array | 17 % (200 %) | 17 % (210 %) | 0.2 % (0.8 %) | 0.1 % (0.4 %) | 0.1 % (0.4 %) |
+| 10 kb away | 11 % (49 %) | 12 % (55 %) | 0.3 % (1.4 %) | 0.2 % (0.7 %) | 0.1 % (0.4 %) |
+| 100 kb | 7 % (41 %) | 7 % (41 %) | < 0.1 % | 0.1 % (0.3 %) | 0.3 % (0.9 %) |
+| 1 Mb | 2 % (17 %) | 2 % (17 %) | 0 | 0 | < 0.1 % |
+
+  (bins: the copies of the 2 bins next to the mate exact, the others as count x g(bin centre)).
+  No global closed form works (the lattice is no better than a uniform density: the error is
+  the local density, not the discreteness); the counts per bin (what the repeat index stores)
+  are enough.
+
+**Binned draw** (`reattribute_v2.binned_draw`, `--far_draw binned --draw_bin`, branch
+`binned-draw`, worktree `~/hicberg_binned`): pairs above --max_combinations, candidates grouped
+by (bin, strand), near combinations (same chromosome, <= 2 bins apart, circular wrap) exact, far
+bin pairs weighted propensity(weighted mean positions, strands) x summed alignment weights, then
+one candidate per drawn bin ∝ its weight; bins doubled while bins1 x bins2 > 4 M. The strand
+must be kept in the bins (orientation-averaged P(s): TV 0.12 on the test laws, 0.002 with the
+strands). Tests: exact distribution reproduced, bin growth.
+
+Benchmark on the human pilot (index-only, chunk 0, 2,000 pairs > 5,000 combinations, median
+550 k combinations, max 406 M; `v2_bench/bench_pilot.py`, outputs `human/binned_draw/`):
+
+| | binned 10 kb | binned 50 kb | hierarchical (current) |
+|---|---|---|---|
+| time per pair, median / mean | 19 / 190 ms | 11 / 120 ms | 1.8 / 3.7 ms |
+| combinations evaluated, mean | 721 k | 384 k | 18 k |
+| TV to the exact distribution, combinations (median / q90) | 0.02 % / 0.7 % | 0.2 % / 0.7 % | - |
+| TV at 1 Mb (median / q90) | < 0.01 % / 0.04 % | 0.02 % / 0.09 % | 8.6 % / 29 % * |
+
+  \* 300 draws per pair on 86 pairs: an exact sampler with 300 draws gives 7.6 % / 25 %, so the
+  hierarchical bias is ~1 point, the rest is sampling noise.
+  Exact distributions computed on the 1,390 pairs <= 4 M combinations. Pairs with index bins on
+  both sides (1,291 / 2,000, median 3.3 M combinations): binned 292 ms vs hierarchical 5 ms.
+
+**Conclusion: the binned draw is nearly exact but 30-50x slower** than the hierarchical draw (the
+bin pairs of two satellite reads stay ~10^5-10^6). Not merged. To be faster it needs bins growing
+with the distance (relative error on P(s) ~ bin / distance: bins ∝ distance keep it constant
+with far fewer bin pairs, as in a fast multipole method).
+
+Follow-up (2026-11-23): **multi-resolution draw** (`multires_plan` / `multires_draw`,
+`--far_draw multires`, branch `binned-draw`): candidates sorted by (chromosome, strand,
+position), levels of 2 kb x 2^l bins (each node a contiguous range), node pairs visited from the
+chromosomes down; cis pair accepted as one block when node size <= theta x gap, trans when node
+size <= 1 Mb, unaccepted leaf pairs evaluated exactly (test: every combination covered once,
+exact distribution reproduced). Pilot, 520 pairs > 5,000 combinations:
+
+| | theta 0.25 | theta 0.5 | hierarchical |
+|---|---|---|---|
+| time per pair, median / mean | 13 / 258 ms | 12 / 243 ms | 1.7 / 3.8 ms |
+| TV to the exact, combinations (median / q90) | 0.8 % / 1.6 % | 1.7 % / 3.1 % | - |
+| TV at 1 Mb (median / q90) | 0.12 % / 0.7 % | 0.22 % / 1.3 % | ~1 point of bias |
+
+The cis part works (blocks grow with the distance), but the trans blocks explode: all the trans
+node pairs are accepted at the 512 kb level, ~10^7 blocks for two reads with ~10^4 bin candidates
+spread over the genome (the 2-D density has no low-rank structure to exploit). Not merged.
+
+**Where the re-attribution time goes** (cProfile, pilot chunk 2, 30,000 pairs, production
+settings: index-only, --max_combinations 5000, hierarchical): 205 s in all
+- candidates of the ambiguous reads 154 s (75 %): `RepeatIndex.score_bin` (local alignment
+  in the <= 50 bins) 98 s, `lookup` (minimizers → bins) 53 s (`_kmer_codes`, argsort / unique);
+- Python tuples of the bin candidates: list comprehension of `index_read_candidates` 11 s +
+  `as_arrays` 14 s (12 %);
+- hierarchical draw of the 4,786 pairs > 5,000 combinations: 21 s (10 %);
+- exact placement in the drawn bins (`place_choices`) 12 s.
+So the far-combination draw is ~10 % of the time (full run: 21.3 M pairs x ~4 ms = ~1.3 h of the
+18.3 h re-attribution): even an instantaneous draw would save little. The time to gain is in
+`score_bin`, `lookup` and the tuple / array conversions (keep the candidates as numpy arrays).
+
+`Laws._density`: groups by chromosome pair with a sort instead of one boolean mask per pair
+(O(n log n) instead of O(n x chromosome pairs)), on the branch.
+
+### Full human run: review; density of the masked bins (2026-11-23)
+
+Full run done (`human/full_run`): 134.6 M ambiguous pairs, 90.3 % placed intra; 152 M pairs after
+hicstuff (66 M unique); ~37 h 25 of computing (alignment 10 h 26, re-attribution 18 h 21, see
+`full_run/figures/hicberg_v2_human_runtime.png`). The first launch was killed (SIGTERM) at the
+start of the re-attribution, the second one stopped at cooler (not in the PATH); the matrices
+stage now reuses the hicstuff outputs when they are newer than predicted.pairs.
+
+Review of the 1 Mb maps (25 intra, all 253 inter in `matrices/plots_1000kb_inter`): saturated,
+uniform rectangles with sharp edges between satellite arrays (chr1 HSat2 x chr16 HSat2, chr1
+HSat2 x chr9 38-57 Mb). Trans O/E with the trans marginals: 12.0 with the unique pairs only (28
+contacts), 18.1 after the rescue; chr9 HSat3 x chr1 HSat2 7.5 → 5.4; acrocentric short arms
+6.4 → 2.8: the enrichment exists in the unique data, the rescue spreads it uniformly over the
+copies (shape expected: the reads only say "HSat2 x HSat2"). 0.7 % of the pairs placed in the two
+HSat2 arrays join them.
+
+**Known-truth test inside the arrays** (`human/scripts/truth_arrays.py`): true cis pairs simulated
+in an array (R1 uniform, signed distance + strands drawn from the unique cis pairs, 150 bp reads
+cut from the genome, 0.3 % substitutions), production path (index only, laws of the run,
+max_combinations 5000). True cis pairs sent in trans: 0.3-0.5 % (1 / 3,000 to chr16 HSat2): the
+rectangles are not misplaced cis contacts. But the distances were too short inside the arrays
+(true / placed, %):
+
+| chr1 HSat2 | < 1 kb | 1-10 kb | 10-100 kb | 100 kb-1 Mb | > 1 Mb |
+|---|---|---|---|---|---|
+| full mode (run) | 21 / 25 | 15 / 28 | 21 / 19 | 24 / 14 | 18 / 14 |
+| binned draw (nearly exact) | 20 / 24 | 16 / 27 | 21 / 20 | 25 / 15 | 19 / 14 |
+| ps mode (no density) | 20 / 18 | 16 / 18 | 21 / 22 | 25 / 25 | 19 / 18 |
+| full, neutral density on masked bins | 20 / 17 | 16 / 20 | 21 / 23 | 25 / 23 | 19 / 18 |
+
+(chr9 HSat3, full: 1-10 kb 16 / 34, 100 kb-1 Mb 23 / 9; neutral: 16 / 22, 25 / 22; unique control
+chr1q unchanged.) Not the draw (the binned draw has the same bias) but the density: the masked
+density bins (no unique pairs) were filled by the adaptive Gaussian smoothing from their flanks,
+then the diagonal forced to 1: inside the arrays 1 on the diagonal vs a constant 0.42 (chr1 HSat2),
+0.17 (chr9 HSat3), 0.50 (chr16 HSat2) elsewhere (unique regions 0.8-0.95), hence contacts
+pulled to short distances. Fix (`density_v2.block_density`): rows / columns without any data →
+density 1 (P(s) alone decides there). Test with depleted flanks around a masked band (old code:
+0.63 off the diagonal in the band). The trans density of the blocks was already ~1.
+
+To do: re-run the human re-attribution with the corrected density; check the effect on yeast and
+mosquito (their masked bins: rDNA, repeats).
+
+### False uniques in the satellites: unique-by-MAPQ reads checked against the repeat index (2026-11-23)
+
+Coverage pile at the edge of the chr16 HSat2 array (52.187 Mb, ~6,000-7,500 reads / 5 kb after
+rescue, 300 in unique regions; data = CHM13 itself, SRR13849430 = CHM13hTERT): reads "unique" by
+MAPQ >= 30 although they have an XS tag, with poor alignments (median AS 258 / 300, NM 4, 150 bp,
+little soft-clipping), mates = HSat2 reads (median 1,548 candidates). The locus is a diverged
+HSat2/3 satellite with a few "mappable" 100-150 bp islands. For 47 % of these reads the repeat
+index finds an alignment >= 2 mismatches better elsewhere (chr16 ~39 Mb): bowtie2 does not extend
+all the seeds of a satellite read and reports a diverged copy with rare seeds, high MAPQ.
+Genome-wide (one pass over the R1 SAM, `human/unique_by_mapq/`): 38 % of the uniques are unique by
+MAPQ only, as well aligned as the others (NM 0: 80 % vs 73 %); index check of 500 random ones:
+0.2 % better elsewhere; attractors: 2 bins of 10 kb outside the mitochondria (chr14 8.27 Mb,
+16,801 reads, NM 5.0; chr16 52.18 Mb, 3,151 reads, NM 3.5).
+
+Fix (`streaming_classifier_v2`): `UniqueVerifier`: a read unique by MAPQ only (XS, MAPQ >= 30)
+with NM >= 4 is ambiguous if one of its candidate bins in the repeat index (the 10 sharing most
+minimizers, its own bin excluded) scores >= its AS - 6 (one mismatch; `score_bin`, ungapped local,
+bowtie2 scale). Same decision for group1 / group2 and for the `unique` flag of the group2 hits.
+Cost: ~4.5 ms per checked read (10 bins), ~2 % of the alignments checked → ~5 h single-process
+inline; parallel pre-pass `find_requalified` (string filters in the reader, checks in a pool,
+index memory-mapped; re-reads both SAM files): ~1 h with 12 workers (4 M-line benchmark: 35 s).
+chr16 peak reads: 49 % requalified; genome-wide sample: 0.02 %. **Off by default**: it fixes 2
+loci (0.04 % of the unique-by-MAPQ reads); `--verify_unique` in the pipeline (pre-pass with
+`--cpus` processes), `verify_unique=<repeat index>, verify_workers=n` in `classify`. To be checked
+on the next human run (do the 2 piles disappear?); to revisit with the optimisation
+(asynchronous checks during the classification, no re-read).
+Test: synthetic genome, exact + diverged copy, read reported on the diverged one.
+
+### Effective mappability (coverage, P(s) areas, density weights); masked density bins interpolated again; informative diagonal (2026-11-23)
+
+**Effective mappability e(f)** (`statistics_v2.effective_mappability_curve`, outputs
+`mappability_calibration/`): the coverage of a 2 kb bin is not proportional to its bedgraph
+mappable fraction f. Local calibration (each bin vs the fully mappable bins within +-50 kb, so that
+the regional biology is not mixed in): e/f at f 0.3-0.5 = 0.77 yeast (35 bp), 0.52 mosquito, 0.48
+human (150 bp: chimera chunks shorter than the 150-mers of the track, MAPQ >= 30, bins next to
+repeats). e(f) (mean, pool-adjacent-violators, 1 at f = 1) now replaces f: coverage
+normalisation (bins kept if e >= 0.2, was f >= 0.3: that threshold had been lowered from 0.8 for
+the mosquito on the assumption that a partially mappable bin is unbiased, which the yeast check
+already contradicted below f = 0.6), density weights (mean e of the 2 kb bins of a density bin),
+P(s) areas and trans lengths (each 100 bp position weighted by e/f of its bin). Effects: mosquito
+coverage of the bins at f 0.3-0.5 0.37 → 0.81 of the median; P(s): human +2-7 % nearly uniform
+(chr1 / chr9 / chr11 tails unchanged), yeast ~1 %, mosquito x1.5-1.7 (short range ~12 % less
+than long range, trans x1.47): the mosquito re-attribution will change a little.
+`--no_effective_mappability` restores the previous behaviour.
+
+**Masked density bins**: with the f weights the flanks of the arrays were depleted, hence the
+interpolated arrays (0.17-0.5 off the diagonal vs 1 on it) and the short-distance bias. With the
+e(f) weights the interpolation is right again (known-truth test, total distance-law error in
+points: chr1 HSat2 / chr9 HSat3 / chr16 HSat2 / unique control): run 16.3 / 21.6 / 8.1 / 0.5;
+e(f) interpolated 6.1 / 7.5 / 6.2 / 1.1; e(f) neutral 5.9 / 7.0 / 4.0 / 0.9; P(s) only 3.2 / 5.2.
+Default: interpolated (`density_masked`, `--density_masked neutral` possible).
+
+**Informative diagonal**: the diagonal of the density (pairs inside one density bin) was forced to
+1 so that P(s) alone decides at the scale of the uncuts / self-ligations, which made sense with
+2 kb density bins (yeast) but not with 50-200 kb bins (human, mosquito): it erased the local
+structure at 0-50 kb and created a contrast with the smoothed neighbours. Now the cis pairs
+< `density_min_distance` (5 kb, where P(s) merges the orientations) are left out of the density
+(`contact_matrix(min_cis_distance)`), the diagonal is smoothed like the rest, and the
+re-attribution holds the density constant below that distance (`Laws.density_of`,
+`density_min_distance.npy`).
+Known-truth test (human arrays, total error in points, chr1 HSat2 / chr9 HSat3 / chr16 HSat2 /
+unique control): e(f) + interpolated + informative diagonal with density **1** below 5 kb: 10.9 /
+10.7 / 9.5 / 1.0, worse: the interpolated arrays are uniform (0.54-0.86, diagonal included), so
+density 1 below 5 kb vs 0.5-0.9 beyond made a step and pulled the contacts below 5 kb (same defect
+as the forced diagonal, at 5 kb instead of 50 kb). With the density held at its **diagonal value**
+below the threshold (no step): **5.0 / 6.1 / 4.2 / 1.1**, the best setting (interpolated, diagonal
+1: 6.1 / 7.5 / 6.2 / 1.1; neutral: 5.9 / 7.0 / 4.0 / 0.9; P(s) only: 3.2 / 5.2).
+P(s) and orientations inside the satellites (unique pairs with both ends in CenSat arrays,
+`human/ps_satellites/`): same shape as the genome from 1 kb to ~500 kb (level lower: mappability
+normalisation), more long-range contacts beyond 1 Mb; orientations identical below 700 bp
+(uncut ~0.95), random from ~1 kb in the genome (strand asymmetry of the unique pairs in HSat2/3:
+selection). Hence the threshold set to **2 kb** (no uncut / self-ligation beyond ~1 kb; validated
+at 5 kb, the 2 kb default to be checked on the next run).
+Held-out likelihood (unique pairs split in halves, densities on one half, 400,000 test pairs at
+10-200 kb, `human/heldout_density/`): gain vs P(s) only, nats / pair: standard (P(s) x coverage)
++0.006; full A (diagonal 1) +0.023 (pairs in one 50 kb block -0.051, others +0.047); full B
+(informative diagonal) +0.031 (-0.002 / +0.042); B - A +0.0087 (SE 0.0003). The forced diagonal
+was worse than P(s) alone inside the density bins; the informative diagonal is kept (default).
+Plot of the calibration, made by the statistics stage of every run (2026-11-24):
+`statistics/plots/effective_mappability.pdf` (`plots_v2.plot_effective_mappability`): local
+coverage ratio of each 2 kb bin vs f (2-D histogram), mean per class of f, e(f) used and the
+identity e = f; number of bins per class below. The ratios come from
+`statistics_v2.local_coverage_ratios`, split out of `effective_mappability_curve` (same values),
+so the plot shows exactly the data of the calibration. Wrapped in try / except in `plot_all`.
+Pilot 20 M (pilot_20M_v3): 1,388,598 bins, e(0.2) = 0.08, e(0.5) = 0.26, e(0.8) = 0.54.
+Limit (shown by the centromeric islands): e depends only on the bin's own f; a fully mappable bin
+surrounded by unmappable bins still loses most of its unique pairs (its mates fall in the
+repeats), hence the context criterion (`--coverage_context_kb`).
+
+### Re-attribution pool: forkserver instead of fork (2026-11-24)
+
+The human v2 run started from the classification (stats + rescue in one hicberg_v2 process) stalled
+in the re-attribution: 18 workers with ~18 GB of anonymous memory each (the laws, density maps and
+matrices of the stats stage, inherited through fork and copied page by page as Python touches the
+objects), free memory 0.9 GB, swap full, 44 % I/O wait, 65 KB of output per chunk after 8.5 h. Runs
+restarted at the rescue stage (small parent) never had it. Fix: the pool of `reattribute()` uses
+`mp.get_context("forkserver")` (workers start from a fresh process; `reattribute_chunk` and the job
+dicts are picklable; checked with a script, the workers' errors come back). The v2 run was
+restarted from the re-attribution (`full_run_v2/run_v2_rescue.sh`).
+
+### Bins kept on f >= 0.9; masked intra density filled along the diagonals; chromosomes excluded from the classification on; readable raw obs / exp plots (2026-11-24)
+
+- Coverage bins kept on their bedgraph fraction f >= 0.9 by default (`--coverage_min_fraction`,
+  e.g. 0.3 for the mosquito), normalised by e(f): even with e(f), the corrected coverage of the
+  partially mappable bins stays low (human, median corrected / median: 0.61 at e 0.2-0.3, 0.77 at
+  0.4-0.5, 0.91 at 0.6-0.7 (f ~0.9), 1.00 above); with e >= 0.2 the chr1 HSat2 arrays were
+  interpolated at 0.36-0.41 x the median from such bins. The masked density bins follow.
+- `density_masked="diagonal"`: in intra, the masked pixels are interpolated along each diagonal
+  between its measured pixels (`density_v2.fill_masked_by_diagonal`): the adaptive Gaussian filled
+  the large unmappable regions with round shapes (disks, rings; chr9 pericentromere) that the
+  re-attribution imprints on the reconstructed contacts; trans keeps the Gaussian (no distance;
+  infers the centromere-centromere enrichment from the neighbours, as in yeast; in human the
+  masked trans pixels end near 1: too few unique trans contacts per 50 kb pixel; pilot at 200 kb:
+  HSat2 chr1 x chr16 1.13 vs 1.06 control, full run 1.05 vs 0.99). Comparison with the Gaussian
+  (f >= 0.9, e(f), informative diagonal, 2 kb): running (`human/run_density_fill09.sh`).
+- `--exclude_chroms` now applies from the classification (pairs with a read on an excluded
+  sequence dropped, counted 'excluded' in group0), so the laws (chrom.sizes.analysis), the
+  re-attribution and the matrices leave them out (before: re-attribution only, chrY still in the
+  laws and their plots).
+- density_intra.pdf / density_trans.pdf: raw obs / exp aggregated to <= ~600 pixels per side
+  (human chromosomes at 50 kb showed only zeros), colour range from the data (98th percentile of
+  |log2|, 1-3), zero contact white, excluded bins grey, readable names.
+- Fix (2026-11-24): the f >= 0.9 threshold was applied to e(f) (keep_fraction passed but not used
+  in `correct_coverage`): human pilot A kept e >= 0.9, i.e. f >= ~0.97.
+- Context criterion (`--coverage_context_kb`, `--coverage_context_fraction` 0.8; off by default
+  for now): a coverage bin is kept only if most of its neighbours also pass the threshold. The
+  isolated mappable islands inside satellite arrays have a low unique-pair coverage (most of their
+  close contacts are with the array, whose reads are ambiguous: those pairs are in group2) and
+  anchored the interpolated arrays low. Human pilot, anchors of the gaps >= 500 kb: 0.41 x the
+  median (f >= ~0.97 alone), 0.68 / 0.73 / 0.82 with 80 % of the bins within +-20 / 50 / 100 kb
+  (2 % of the kept bins removed; chr1 q-arm control 0.91).
+- trans_ps.pdf: second page, balanced observed / expected trans contacts (`plots_v2.trans_oe`:
+  ICE-like balancing of the trans P(s) matrix, diagonal ignored; per-chromosome factors such as
+  mappable length, copy number, coverage are absorbed, so the P(s) matrix is balanced directly),
+  labelled "relative contacts, display only"; the first page (absolute rates per pair of mappable
+  positions) is the one used for the re-attribution weights (a read matching the mitochondria and
+  a NUMT must keep the ~25x higher copy number of the mitochondria). Human pilot: small gene-rich
+  chromosomes (16, 17, 19, 20, 22) and acrocentrics enriched together, large chromosomes depleted
+  with the small ones.
+
+### Chimeric reads: soft-clip tested at both ends; whole aligned part kept (2026-11-24)
+Human full run, first 2 M primary alignments of R1 (150 bp, Arima: DpnII, HinfI, DdeI, MseI):
+150M 46 %, no clip with indel 2 %, clip 1-19 bp 18 % (40 % carry one of the 16 ligation
+junctions), clip >= 20 bp 34 % (74 % carry a junction; background on unclipped reads 27 %,
+short motifs). About a third to 40 % of the reads are chimeric. The classifier counter
+(`chimeric_r1/r2`, 12-13 % of the pilot reads) only covers the ambiguous reads (XS) with the
+criterion below, not the library.
+Bug: `is_chimeric` tested only the LAST CIGAR operation. The CIGAR follows the reference strand,
+so this was the read 3' end for forward reads and the 5' end for reverse ones (clip > 30 bp:
+read 3' end 16 %, 5' end 11 % on both strands; tested 16 % forward, 11 % reverse). A chimeric read
+with > 50 % aligned and its junction on the untested side went to the re-attribution whole
+(150 bp, minimizers of the partner fragment searched too). Now: clip > threshold_clip at either
+end. `get_largest_M_chunk` now returns the query between the leading and trailing soft-clips
+(an indel split the read and only the longest M block was kept). 35 bp reads (mosquito, yeast):
+a clip > 30 bp is impossible, only the aligned-fraction criterion acts, so little change.
+Applies from the next classification (pilot C); runs classified before are unchanged.
+
+### Mosquito repeat index for 35 bp reads (k 21, w 4): validation against bowtie2 -k 100 (2026-11-24)
+Index `moustic/repeat_index_k21_w4/mosq_k21_w4` (min_count 2; 219 M minimizers, 11.4 M repeated,
+265 s). 100,000 R1 reads aligned with bowtie2 -k 100 (`moustic/index_validation_k21_w4/`); 12,752
+reads ambiguous between >= 2 bins at the best AS. 2.9 % have no repeated minimizer (all with
+NM >= 1: one error in the middle of a 35 bp read destroys every 21-mer) and fall back to the
+first bowtie2 hit. Reads with minimizers: 97.9 % of the best-AS copies found in the same bin,
+98.1 % with the adjacent bin (reads across a bin border); all copies for 96.8 % of the reads.
+50 % of the ambiguous reads hit the -k 100 cap; median bins per read 13 (bowtie2, best AS) vs
+42 (index). To do after the run (agreed): lookup of the 1-substitution variants for the reads
+without minimizer (nucleus 3.2 % of the ambiguous reads, Wolbachia 0.4 %, mito / NUMT 1 of 117).
+
+### Known-truth test with indels (2026-11-24)
+Minimizer search and `score_bin` are ungapped. Measured: 4.0 % of the human primary alignments
+carry an indel (4.8 % of the reads with XS), mosquito 1.8 %. Known-truth test
+(`human/truth_indels/`, `scripts/truth_indels.py`): one indel (1-3 bp) in EVERY simulated read vs
+substitutions only, same seeds, laws of `statistics_eff_gaussfill_f09`; new source `low_copy`
+(reads with 2-50 candidate bins, re-aligned by score_bin). Distance law unchanged (gaps 7.2 → 6.1,
+6.6 → 6.8, control 0.5 → 0.7, low_copy 0.2 → 0.8 points). Wrong copy (> 10 kb): low_copy
+11.4 → 14.7 %, control 9.1 → 10.0 %. Right copy with the 5' end shifted 20-200 bp: low_copy 37 % of
+the pairs (start of the aligned segment, as the bowtie2 POS of a soft-clipped read; no effect on
+the maps). With 4 % of reads with an indel: ~0.3 % of the low-copy pairs. No gapped scoring for now.
+
+### density_intra / density_trans.pdf: large sequences only (2026-11-24)
+`plot_density_matrices(min_bins=5)`: only the sequences with >= 5 density bins get pages. The
+mosquito scaffolds (1-2 bins of 200 kb) filled the 200 trans pages with unreadable maps; now
+3 chromosomes, Wolbachia (7 bins) and 4 scaffolds of >= 1 Mb: 8 intra, 28 trans pages. Also seen on
+`moustic/..._v3_fine_dedup/statistics_effmap` (computed 2026-11-23 noon): thin white lines in
+the trans density = isolated masked 200 kb rows at exactly 1, the "neutral" rule of that day;
+the current code keeps the Gaussian values in trans (rows interpolated from their neighbours).
+Pairs of very different sizes (> 8x: mosquito chromosome x Wolbachia, 160x) are drawn with the short
+axis stretched ("not to scale" in the title) instead of real proportions (a line of pixels). Mosquito
+chromosome x Wolbachia density (statistics_effmap): 1.000 +- 0.001 over the whole block: the density is
+relative inside each block (the level of the nucleus-Wolbachia contacts is in the trans P), and the
+adaptive kernel (n_min_trans 200 contacts) spans the 7 Wolbachia bins: no structure resolved.
+
+### Pilots A / B / C (2026-11-25)
+`human/compare_pilots/` (`scripts/compare_pilots.py`), predicted pairs of the three pilots (same
+candidates; A Gaussian fill, B diagonal fill, C = B + context criterion). Distance law in the
+arrays, gap to the genome law of the unique pairs: chr1 HSat2 14.0 / 12.4 / 15.1, chr16 HSat2
+11.3 / 9.7 / 8.3, chr9 HSat3 8.5 / 8.2 / 10.3 (the unique chr1q control also gives ~19: group2 pairs
+are enriched in short pairs inside one repeat; relative use only). 50 kb block ratio 0.95-1.0 in
+all (2.2-2.7 in full_run): artefact gone. Trans O/E chr1 HSat2 x chr16 HSat2 = 38 in all three,
+chr1 x chr9 7.5, chr13 x chr14 p-arms 3.4: unchanged by the density fill. Piles chr16:52.18 Mb
+5.2-5.6x and chr14:8.27 Mb 8.4x the chromosome median in all three (unique 0.1-0.4x) despite
+--verify_unique. Coverage of the kept bins near the satellite edges / elsewhere: A 0.82, B 0.82,
+C 0.91. Laws: A ~ B on real data; C fixes the coverage near the centromeres. Rectangles and piles
+come from the candidates / weights, not from the laws.
+
+### Trans rectangles between satellite arrays: real family-level contacts (2026-11-25)
+Pilot A, chr1 HSat2 x chr16 HSat2: 3,007 predicted trans pairs (0.9 % of the 340,000 cis pairs of
+the two arrays); 91 % with > 50 candidate bins at both ends (bins mode). 300 of them vs 300 cis chr1
+HSat2 pairs (sequences from the group2 FASTQ, repeat index lookup): the end placed on chr16 has its
+best bin on chr16 (best on chr1: 0.09 of it), the end placed on chr1 on chr1 (best on chr16: 0.11):
+chr1 and chr16 HSat2 are distinct families at the minimizer level and each end is placed in its own
+family. Shared minimizers of the placed bin / best bin: 0.68-0.71, as for the cis controls (0.69).
+So the rectangles are molecules with a chr1-HSat2 read and a chr16-HSat2 read (inter-chromosomal
+satellite clustering), spread uniformly because a copy cannot be placed inside its array; a
+divergence weight would not remove them. Full run rescued map: 22.6 % of the chr1 x chr16 contacts
+between the two arrays (0.6 % of the area). CiFi (MAPQ >= 30) cannot check it: 2 pairs between the
+arrays, 331 trans ends in chr1 HSat2 (long monomers do not map in HSat2 either).
+
+### Coverage piles in satellite arrays: reads kept at a poor first alignment (2026-11-25)
+Piles chr16:52.15-52.21 Mb (edge of the chr16 HSat2 array) and chr14:8.25-8.29 Mb (HSat3,
+(GGAAT)n): 45 % / 55 % of the predicted ends there have one candidate (kept at the bowtie2 first
+alignment). 400 such reads of the chr16 pile (pilot A): local score at the placed bin 0.74 of a
+perfect match (median), 11 mismatches over 150 bp at the best ungapped offset (18 with a ligation
+junction, 7 without), 7 % of their 31-mers found in chr16:52.14-52.22; genome-wide 31-mer scan:
+only 30 % have an exact copy anywhere (>= 90 % of their 31-mers in one 2 kb bin; 39 % of those at
+the pile), 22 % share no 31-mer with the genome. bowtie2: AS median 196 / 300, 48 % soft-clipped
+>= 20 bp, NM median 4 (NM >= 4: 54 %), 38 % MAPQ >= 30 (unique mates, not requalified: no copy in
+the index). Sample of 3,000 group2 pairs of the whole pilot: 41 % of the ambiguous reads have no index
+candidate (5.7 M reads in the pilot); their first alignment is exact (NM median 0, aligned 92 bp),
+clearly the best (AS - XS >= 6: 89 %, ties 2 %), NM >= 4 for 17 %. So the fallback is right in
+general; the piles collect degraded reads (errors in low-complexity satellites, chimeras) that match
+nothing exactly and converge on a few loci. Candidate rule: a read without index candidate whose
+first alignment has NM >= 4 is not placeable (pair unplaced) - to test (fraction lost, piles).
+Implemented (off by default, under test): the classifier writes the NM of the first alignment in
+group2_hits (6 fields per mate; old 5-field files read with NM = -1, kept); `--max_fallback_nm N`
+(reattribute_v2.index_read_candidates): a read without index candidate (ambiguous, or unique and not
+requalified) whose first alignment has NM >= N gets no candidate, its pair is unplaced (counted
+unplaceable_fallback / unplaceable_unique). Pilot D (`human/pilot_20M_v3_gctx_nm4`): classification of
+pilot A with the NM added from the SAM (`scripts/add_nm_to_hits.py`; NM >= 4: R1 0.86 M, R2 2.64 M of
+the 11.58 M group2 pairs), laws Gaussian + context (defaults), --max_fallback_nm 4.
+Defaults changed: --coverage_context_kb 100 (pilot C: coverage near the satellite edges 0.82 → 0.91);
+the Gaussian fill stays the default (known-truth test, 2026-11-24).
+
+### Mosquito: new run vs manuscript (2026-11-25)
+`moustic/manuscript_v4_index/` (README): figures and tables of the manuscript recomputed on
+`pipeline_v2_mitoMM265a_v4_index` (index k21/w4) vs the manuscript run (`_v3_fine`, -k 100). Copy
+numbers, gains and molecule O/E unchanged (mito 3.22 → 3.25, plasmid 7.52 → 7.37, gains x3.2), except
+mito x chr3 after re-attribution (O/E 0.041 → 0.066; mito→Wolbachia / mito→nucleus 3.3 → 2.6): mito x
+chr3-NUMT (89.68-89.70 Mb) contacts 8 → 131, all with the NUMT end an ambiguous read WITHOUT repeated
+minimizer (an error in a 35 bp read kills every 21-mer), kept at its first bowtie2 alignment (NUMT about
+half the time). The reference sequence at the first alignment, looked up in the index, finds the
+mitochondrion for 131 / 132 of them: candidate fix for the fallback reads (instead of 1-substitution
+variants): look up the reference segment at the first alignment, then score the read in each bin.
+Fix implemented (2026-11-25): `index_read_candidates`: an ambiguous read without repeated minimizer is
+looked up again through `RepeatIndex.reference_segment` (genome sequence at its first alignment, read
+length); found copies are scored with `score_bin(..., anchor=reference)`: the diagonals come from the
+reference k-mers (same length and frame as the read; reverse-complemented for a reverse hit), the score
+from the read itself (one error in the middle of a 35 bp read kills every exact 21-mer anchor too).
+Counted as index_ref_lookup. Test: test_fallback_read_found_through_its_reference (forward and reverse).
+Mosquito re-run from the re-attribution with the v4 laws: `moustic/pipeline_v2_mitoMM265a_v4b_reflookup`,
+values in `moustic/manuscript_v4b_reflookup/`.
+Result (2026-11-25): mosquito re-attribution with the reference lookup: 86,471 of the 98,734 fallback reads
+find their copies, 12,263 stay at their first alignment; mito x chr3-NUMT contacts 131 → 14 (old -k 100
+run: 8-11); mito→Wolbachia / mito→nucleus after re-attribution 2.6 → 3.2 (manuscript 3.3); copy numbers,
+gains and molecule O/E as in the manuscript (moustic/manuscript_v4b_reflookup/README.txt).
+Final mosquito run (2026-11-25): `moustic/pipeline_v2_mitoMM265a_v5_gctx` (Gaussian fill + context, f >= 0.3,
+reference lookup), values in `moustic/manuscript_v5_gctx/README.txt`: copy numbers and molecule O/E as in the
+manuscript (mito 3.25, plasmid 7.37; chr x chr 0.47-0.50; mito x chr 0.032-0.044); mito x NUMT 12. New
+normalisations (`manuscript_v4_index/extra_normalisations.py`): mito row with the trans coverage (plasmid in
+Wolbachia): mito→Wolbachia / mito→nucleus 1.7 with the unique pairs (= total coverage), 0.8 after
+re-attribution (total coverage 3.1): only the unique-pair value is robust; prophages normalised inside
+Wolbachia: prophage x prophage 0.97-1.90 vs prophage x backbone 0.60-0.72.
+Manuscript updated (2026-11-25): `moustic/manuscript/` now built on `pipeline_v2_mitoMM265a_v5_gctx` (previous draft,
+figures and tables archived in `manuscript/archive_2026-11-20_run_v3_fine/`): figures 1, 2, 5-8, S1-S3 and tables S3-S6
+replaced, new Table S7 (extra normalisations), `supplementary/manuscript_values_vs_2026-11-20.txt`; text: every
+value of sections 1, 4-7, summary, methods (index-only re-attribution with reference lookup, effective mappability,
+context criterion, Gaussian fill, hicstuff 27 / 2, swapped-mate duplicates), legends and limitations;
+`scripts/regenerate_all.sh` on the v5 run. Fig. 3, 4, S4, S5 kept (unique pairs of the runs of 2026-11-20).
+The trans shares of the nucleus / Wolbachia quoted before (0.4-0.6 / 0.6-1.2 %) were not reproducible with the
+definition that gives the mitochondrion's 4.7-4.9 %; now 0.5-0.7 / 0.9-1.7 % with that definition.
+
+### Coverage piles: 31-mer counts in the raw reads; the NM >= 4 rule not retained (2026-11-25)
+Pilot D (`--max_fallback_nm 4`): 1.47 M pairs unplaced (-12.7 %; 671,307 ambiguous and 884,193 unique reads),
+piles chr16 5.2 → 4.7x, chr14 8.4 → 9.4x: rule not retained (option kept, off). In D, 25 % of the chr16 pile
+ends are one-candidate reads; most pile pairs have both ends in the array (~30 % both in the pile); neither the
+density (0.73 at the edge vs 0.85 inside), the coverage law nor the copy weights (pile = 5 of ~1,600 candidate
+bins, weight = the median) attract them. Alignment-free test (`human/pile_kmers/`, README): genome-unique 31-mers
+spaced >= 150 bp, counted with bbduk in the raw FASTQ (233 M reads x 2): pile chr16 2.1x and chr14 2.3x the
+unique controls (flank 0.9, controls 0.9-1.1) vs 4.4x and 10.3x in the rescued map of the full run. The piles are
+a real ~2x excess exaggerated 2-4.5x. The array edges are far more singular (21-22 % genome-unique 31-mers vs
+0.3-5 % inside): degraded satellite reads that match nothing exactly get their best alignment there and their
+mates follow by P(s). Open: how to spread such reads over their family instead (seed effect).
+Restriction sites (4 Arima enzymes) per kb: HSat2 chr16 (pile and inside) 54.5-55.4 (HinfI GANTC 51-52, from the
+CATTC / GAATG repeat) vs 15-19 in unique sequence (3.5x): explains the ~2x excess of the chr16 pile 31-mers (and
+3.4-4.7x inside); chr14 pile 21.8 vs ~16 (1.3x) for 2.3x. Comparable coverage metric (`scripts/pile_coverage.py`:
+read ends of the filtered pairs in the region / median over same-size windows of the chromosome): pilot A
+rescued: pile chr16 3.7, chr14 5.0 (31-mers 2.1, 2.3), flank 0.9 (0.9), HSat3 inside 0.7 (0.7); pilot D 2.9 / 5.1.
+Fix under test (pilot E, `human/pilot_20M_v3_gctx_ref`): reference lookup for the fallback reads (now always on)
++ `--requalify_nm 4` (a group2 read unique by MAPQ with NM >= 4 is re-examined as ambiguous: its copies from the
+index compete with its first alignment through the alignment weights; test test_degraded_unique_read_requalified).
