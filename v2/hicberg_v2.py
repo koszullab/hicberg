@@ -211,10 +211,11 @@ def main():
                    help="Index-only mode: a read without any index candidate whose first alignment has "
                         "NM >= this value is not placed (its pair is unplaced): degraded satellite reads "
                         "that piled up at a few loci. Default: off (under test, 2026-11-25)")
-    p.add_argument("--requalify_nm", type=int, default=None,
+    p.add_argument("--requalify_nm", type=int, default=4,
                    help="Index-only mode: a group2 read unique by MAPQ whose first alignment has NM >= this "
                         "value is re-examined as ambiguous (its copies from the index compete with its first "
-                        "alignment through the alignment weights). Default: off (under test, 2026-11-25)")
+                        "alignment through the alignment weights; human pilot E: pile chr16 3.7 -> 2.7x for "
+                        "2.1x in the raw reads, nothing else changed). Default 4; -1 = off")
     p.add_argument("--max_combinations", type=int, default=5000,
                    help="Pairs with more candidate combinations are drawn hierarchically (near combinations exact, far ones by importance sampling; indistinguishable from the exact draw on yeast, ~3 ms per pair; 0 = always exact; default 5000)")
     p.add_argument("--coverage_min_fraction", type=float, default=None,
@@ -454,7 +455,7 @@ def main():
                        index_only=args.candidates == "index" and not omics,
                        max_combinations=args.max_combinations,
                        exclude_chroms=excluded, max_fallback_nm=args.max_fallback_nm,
-                       requalify_nm=args.requalify_nm)
+                       requalify_nm=None if args.requalify_nm < 0 else args.requalify_nm)
 
     # --- omics: signal tracks instead of the matrices ---
     if omics and run_stage("matrices", args):

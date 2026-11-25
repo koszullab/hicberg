@@ -819,6 +819,17 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
         context_fraction=coverage_context_fraction,
         min_mappable_bp=coverage_min_bp, min_ratio=coverage_min_ratio)
 
+    # bins of the density: kept on the mappable fraction alone (no context criterion)
+    dens_kept = cov_kept
+    if cov_kept is not None and map_coarse is not None and coverage_context_kb > 0:
+        dens_kept = {}
+        for c, k in cov_kept.items():
+            f = np.zeros(len(k))
+            fc = np.asarray(map_coarse.get(c, []), np.float64)[:len(k)]
+            f[:len(fc)] = fc
+            wid = np.clip(chrom_sizes[c] - np.arange(len(k)) * bin_size, 0, bin_size)
+            dens_kept[c] = k | ((f >= coverage_min_fraction) & (f * wid >= max(coverage_min_bp, 1e-9)))
+
     np.save(output_dir / XS,           acc.xs)
     np.save(output_dir / CHROM_SIZES,  chrom_sizes)
     np.save(output_dir / UNCUTS,       uncuts)
@@ -869,9 +880,12 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
             n_bins_, _ = dn.genome_bins(sizes_, db_)
             mask_ = {}
             for (c, L), n in zip(sizes_.items(), n_bins_):
-                # a density bin is bad if none of its coverage bins is kept
-                if cov_kept is not None:
-                    k = np.asarray(cov_kept[c], dtype=np.float64)
+                # a density bin is bad if none of its coverage bins is kept (on the mappable fraction
+                # only: the context criterion is for the coverage normalisation; it masked the
+                # centromeric bins of the mosquito, whose unique pairs show the centromere clustering,
+                # and their trans density fell from 9-24 to ~2, 2026-11-25)
+                if dens_kept is not None:
+                    k = np.asarray(dens_kept[c], dtype=np.float64)
                     idx = np.minimum(np.arange(len(k)) * bin_size // db_, n - 1)
                     bad_c = np.bincount(idx, weights=k, minlength=n)[:n] == 0
                 else:
@@ -893,7 +907,7 @@ def generate_statistics(pairs_path, chrom_sizes_path, output_dir, bin_size=2000,
 
         bad = weights = None
         mask = density_mask(chrom_sizes, db)
-        if cov_kept is not None:
+        if dens_kept is not None:
             bad = np.concatenate([mask[c][0] for c in chrom_sizes])
         if bg is not None:
             weights = np.concatenate([mask[c][1] for c in chrom_sizes])

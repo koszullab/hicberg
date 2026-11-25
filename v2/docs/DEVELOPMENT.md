@@ -1849,3 +1849,26 @@ rescued: pile chr16 3.7, chr14 5.0 (31-mers 2.1, 2.3), flank 0.9 (0.9), HSat3 in
 Fix under test (pilot E, `human/pilot_20M_v3_gctx_ref`): reference lookup for the fallback reads (now always on)
 + `--requalify_nm 4` (a group2 read unique by MAPQ with NM >= 4 is re-examined as ambiguous: its copies from the
 index compete with its first alignment through the alignment weights; test test_degraded_unique_read_requalified).
+
+### Context criterion masked the centromeric density (2026-11-25)
+Whole-genome mosquito maps at 1 Mb: the centromere-clustering spots were weaker with hicberg in the run v5
+(Gaussian + context) than in the manuscript run (`_v3_fine`). Spot enrichment (O/E 3x3 / median of the trans
+block): unique pairs 8-13x in both runs, rescued 3-5x (`_v3_fine`) vs 1.8-2.2x (v5). The trans density at the spots
+was 9-16 (`_v3_fine`), 14-24 (v4, diagonal fill) but 1.8-2.6 in v5: the density bad bins were the coverage bins not
+kept, and the context criterion (bins mostly surrounded by poorly mappable bins) had masked the centromeric bins,
+whose density was then filled by the smoothing. Fix (`generate_statistics`): the density mask uses the mappable
+fraction only (f >= threshold, >= min mappable bp); the context criterion is for the coverage normalisation only.
+Mosquito v6 (`pipeline_v2_mitoMM265a_v6_gctx_densfix`): density 14-24 at the spots again, 103 masked density bins.
+The human pilots C / D / E (context) had the same masking of the centromeric trans density.
+New plotting options of `matrices_v2.plot_before_after` (defaults unchanged): `coverage_log`, `cmap_name`,
+`per_map_percentiles` (one colour scale per map), `segments` (molecule names and borders on a pseudo-chromosome);
+`manuscript/scripts/fig_whole_genome_hicberg_style.py`: whole metagenome at 1 Mb with the hicberg rendering.
+
+### Pilot E: reference lookup + re-examined unique reads; --requalify_nm 4 by default (2026-11-25)
+`human/pilot_20M_v3_gctx_ref` (laws of D, reference lookup, --requalify_nm 4: 1,015,489 unique reads with NM >= 4
+re-examined, 602,697 reads without repeated minimizer found through the reference; all pairs placed). Pile
+coverage (scripts/pile_coverage.py; raw-read 31-mers 2.1 / 2.3): chr16 3.7 (A) / 2.9 (D) / 2.7 (E); chr14 5.0 /
+5.1 / 4.7; controls unchanged (flank 0.9, HSat3 inside 0.7). Distance law in the arrays, 50 kb blocks, trans
+rectangles unchanged (compare_pilots_ref/). --requalify_nm 4 becomes the default (-1 = off). The chr14 HSat3 pile
+(4.7x for 2.3x) stays open. Known-truth test of the arrays with the code of 2026-11-25 (reference lookup):
+5.5 / 5.0 / 7.3 / 1.0 points (code of 2026-11-24: 5.5 / 5.0 / 6.7 / 1.0, sampling noise).

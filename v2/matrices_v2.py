@@ -395,7 +395,8 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                       sites=None, enzyme_label="restriction sites", chrom_pairs=None,
                       intra_only=False, vmin_raw=None, vmax_raw=None,
                       labels=("unrescued", "rescued"), repeat_links=None, min_link_kmers=3,
-                      max_arcs=400, display_names=None, regions=None, annotations=None):
+                      max_arcs=400, display_names=None, regions=None, annotations=None, coverage_log=False,
+                      cmap_name="afmhot_r", per_map_percentiles=None, segments=None):
     """
     Two multi-page PDFs (matrices_raw.pdf, matrices_normalised.pdf), one page
     per pair of chromosomes (all pairs, or intra only, or chrom_pairs), as in
@@ -416,6 +417,14 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
     "repeats": DataFrame chrom start end cls (RepeatMasker class), "censat": DataFrame chrom start
     end name rgb} with the cooler's chromosome names → a third track row: genes under the left
     map, repeat classes + satellite annotation under the right one.
+    cmap_name: colour map of the contact maps (default afmhot_r, the hicberg output).
+    segments: [(label, first bin, number of bins), ...] of a pseudo-chromosome made of several
+    molecules (whole metagenome on one page): boundary lines on the maps and tracks, molecule names
+    as ticks instead of kb (molecules narrower than 2 % of the axis share one label).
+    per_map_percentiles: (low, high) → each map gets its own colour scale from these percentiles of its
+    non-zero log10 pixels (contrast of each map; default: one scale shared by the two maps).
+    coverage_log: coverage track in log scale (whole metagenome: multi-copy molecules hundreds of times
+    more covered than the nuclear chromosomes).
     """
     import cooler
     from plots_v2 import opaque_imshow
@@ -425,7 +434,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         chrom_pairs = [(c, c) for c in names] if intra_only else \
             list(itertools.combinations_with_replacement(names, 2))
     kb = unres.binsize / 1000
-    cmap = plt.get_cmap("afmhot_r").copy()
+    cmap = plt.get_cmap(cmap_name).copy()
     cmap.set_bad("white")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -639,6 +648,21 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         else:                                               # trans: far fewer contacts per pixel
             vmin, vmax = 0.0, max(np.percentile(finite, 99.5), 0.5)
 
+        seg_ticks = None
+        if segments:
+            tot = sum(n for _, _, n in segments) * kb
+            big = [(lab_, (f + n / 2) * kb) for lab_, f, n in segments if n * kb >= 0.02 * tot]
+            small = [(f + n / 2) * kb for lab_, f, n in segments if n * kb < 0.02 * tot]
+            small_lab = "/".join(lab_ for lab_, f, n in segments if n * kb < 0.02 * tot)
+            pos = [x_ for _, x_ in big] + ([float(np.mean(small))] if small else [])
+            labs = [l_ for l_, _ in big] + ([small_lab] if small else [])
+            seg_ticks = (pos, labs, [f * kb for _, f, _ in segments[1:]])
+        lims = [(vmin, vmax), (vmin, vmax)]
+        if per_map_percentiles is not None:
+            lims = []
+            for z in (z_u, z_r):
+                fz = z[np.isfinite(z)]
+                lims.append(tuple(np.percentile(fz, per_map_percentiles)) if fz.size else (vmin, vmax))
         cmap_page = cmap
         if region:
             # windows: zero-contact pixels stay white; every pixel with >= 1 contact is coloured
@@ -677,7 +701,7 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
         for col, (lab, z) in enumerate(((labels[0], z_u), (labels[1], z_r))):
             x0 = left + col * (side + gap)
             ax = fig.add_axes(frac(x0, map_y, side, h_map))
-            im = opaque_imshow(ax, z, cmap_page, vmin, vmax, bad="white", extent=extent, aspect="auto")
+            im = opaque_imshow(ax, z, cmap_page, *lims[col], bad="white", extent=extent, aspect="auto")
             pad = 6 + (72 * (arc_h + 0.1) if arcs is not None and a != b else 0)
             where = (f"{nm(a)}:{region[0] / 1e6:g}-{region[1] / 1e6:g} Mb" if region
                      else f"{nm(a)} × {nm(b)}")
@@ -685,6 +709,12 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                          f"{n_contacts[col]:,} contacts", fontsize=9, pad=pad)
             ax.set_ylabel(f"{nm(a)} (kb)", fontsize=8)
             ax.tick_params(labelbottom=False, labelsize=7)
+            if seg_ticks is not None:
+                for e in seg_ticks[2]:
+                    ax.axhline(e, color="black", lw=0.6)
+                    ax.axvline(e, color="black", lw=0.6)
+                ax.set_yticks(seg_ticks[0], seg_ticks[1], fontsize=7)
+                ax.set_ylabel("")
             cax = fig.add_axes(frac(x0 + side + 0.1, map_y, cb, h_map))
             fig.colorbar(im, cax=cax, label="log10 contacts")
             if col == 0 and arcs is not None:
@@ -737,6 +767,8 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                         tr.plot(x, values, color=color, lw=0.9, label=label)
                 if median is not None:
                     tr.axhline(median, color="black", ls="--", lw=0.8)
+                    if coverage_log:
+                        tr.set_yscale("log")
                 if any(lbl for _, _, lbl in series if lbl not in (None, "fill", "bar")):
                     tr.legend(fontsize=6, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False)
                 import textwrap
@@ -746,6 +778,13 @@ def plot_before_after(unrescued_cool, rescued_cool, output_dir, mappability=None
                 tr.set_xlim(extent[0], extent[1])
                 if k == len(tracks) - 1:
                     tr.set_xlabel(f"{nm(b)} (kb)", fontsize=8)
+                if seg_ticks is not None:
+                    for e in seg_ticks[2]:
+                        tr.axvline(e, color="black", lw=0.6)
+                    tr.set_xticks(seg_ticks[0], seg_ticks[1] if k == len(tracks) - 1 else [""] * len(seg_ticks[0]),
+                                  fontsize=7, rotation=90)
+                    if k == len(tracks) - 1:
+                        tr.set_xlabel("")
         pdf.savefig(fig)
         plt.close(fig)
 
